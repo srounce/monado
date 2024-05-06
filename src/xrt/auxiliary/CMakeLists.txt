@@ -71,3 +71,6 @@ endif()
 if(XRT_MODULE_AUX_RENDER)
 	add_subdirectory(render)
 endif()
+
+# additional init/fixup routines
+add_subdirectory(fixup)

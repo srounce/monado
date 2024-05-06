@@ -653,6 +653,7 @@ if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE)
 			drv_vp2
 			drv_includes
 			base
+			aux_fixup
 			xrt-interfaces
 			xrt-external-openvr
 			xrt-external-cjson
