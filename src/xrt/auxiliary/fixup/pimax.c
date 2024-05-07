@@ -51,7 +51,7 @@ pimax_get_view_poses(struct xrt_device *xdev,
                      struct xrt_fov *out_fovs,
                      struct xrt_pose *out_poses);
 
-
+// the results don't exactly line up with what I get from the pimax software
 #define PIMAX_IPD_RAW_MAX 36526
 #define PIMAX_IPD_RAW_MIN 32940
 #define PIMAX_IPD_MIN 0.06
@@ -59,6 +59,10 @@ pimax_get_view_poses(struct xrt_device *xdev,
 
 float pimax_8kx_ipd_from_raw(uint16_t raw){
     return PIMAX_IPD_MAX - (raw - PIMAX_IPD_RAW_MIN) * (PIMAX_IPD_MAX-PIMAX_IPD_MIN)/(PIMAX_IPD_RAW_MAX-PIMAX_IPD_RAW_MIN);
+}
+
+float pimax_8kx_lens_separation_from_raw(uint16_t raw){
+    return raw * (PIMAX_IPD_MAX-PIMAX_IPD_MIN)/(PIMAX_IPD_RAW_MAX-PIMAX_IPD_RAW_MIN);
 }
 
 void pimax_8kx_read_config(struct pimax_device* dev){
@@ -71,15 +75,15 @@ void pimax_8kx_read_config(struct pimax_device* dev){
     if(hid_get_feature_report(dev->hid_dev, buf, 64) == -1){
         U_LOG_E("Failed to read feature report: %ls", hid_error(dev->hid_dev));
         return;
-    } 
+    }
     dev->device_config.upscaling = buf[35] & 1;
-    dev->device_config.ipd = pimax_8kx_ipd_from_raw(*(uint16_t*)(&buf[36]));
+    dev->device_config.ipd = pimax_8kx_lens_separation_from_raw(*(uint16_t*)(&buf[36]));
     U_LOG_D("IPD Set to %f", dev->device_config.ipd);
 }
 
 
 void pimax_8kx_poll(struct pimax_device* dev){
-    //U_LOG_D("Pimax poll");
+    U_LOG_D("Pimax poll");
     os_mutex_lock(&dev->hid_mutex);
     if(!dev->hid_dev){
         U_LOG_E("Pimax HID device not available");
@@ -102,7 +106,7 @@ void pimax_8kx_poll(struct pimax_device* dev){
 
     if(report_type == 238){
         // IPD Changed
-        dev->device_config.ipd = pimax_8kx_ipd_from_raw(*(uint16_t*)(&buf[4]));
+        dev->device_config.ipd = pimax_8kx_lens_separation_from_raw(*(uint16_t*)(&buf[4]));
         U_LOG_D("IPD Set to %f", dev->device_config.ipd);
     }
     os_mutex_unlock(&dev->hid_mutex);
@@ -180,8 +184,8 @@ long init_pimax8kx(struct fixup_context* ctx, struct fixup_func_list* funcs, str
 	xrtdev->hmd->distortion.preferred = XRT_DISTORTION_MODEL_COMPUTE;
 	xrtdev->compute_distortion = pimax_compute_distortion;
     // pure guesses, likely wrong
-    xrtdev->hmd->distortion.fov[0] = (struct xrt_fov){-1.2043, 0.7156, 0.8862, -0.8862};
-    xrtdev->hmd->distortion.fov[1] = (struct xrt_fov){-0.7156, 1.2043, 0.8862, -0.8862};
+    xrtdev->hmd->distortion.fov[0] = (struct xrt_fov){-1., 1., 0.8727, -0.8727};
+    xrtdev->hmd->distortion.fov[1] = (struct xrt_fov){-1., 1., 0.8727, -0.8727};
 
 	xrtdev->get_view_poses = pimax_get_view_poses;
 	xrtdev->hmd->blend_modes[0] = XRT_BLEND_MODE_OPAQUE;
@@ -308,8 +312,8 @@ u_compute_distortion_ndvive(struct u_vive_values *values, float u, float v, floa
         // tangential distortion
         float x = texCoord.x;
         float y = texCoord.y;
-        float xn = x + (2*p1*x*y + p2*(r2 + 2 * x*x));
-        float yn = y + (p1*(r2 + 2 * y*y) + 2*p2*x*y);
+        float xn = x;// + (2*p1*x*y + p2*(r2 + 2 * x*x));
+        float yn = y;// + (p1*(r2 + 2 * y*y) + 2*p2*x*y);
 		struct xrt_vec2 offset = {0.5f, 0.5f};
 
 		tc[i].x = offset.x + (xn * d + val.center[i].x) * factor.x * 1.2;
@@ -331,11 +335,13 @@ pimax_compute_distortion(
     //U_LOG_D("Distortion %f:%f is now %f:%f\n", u, v, out_result->r.x, out_result->r.y);
     // correct for the canted displays
     float xdir = view ? -1.f : 1.f;
-    u += xdir * 0.05f;  // adjust for the lenses moving over the displays. this value works decently for 0.067m IPD
-    //u *= (608.f/508.f);
-    /*v -= 0.5f;
-    v *= 1 + ((view ? 1-u : u) * (0.173228346f));
-    v += 0.5f;*/
+    u -= 0.5f;
+    v -= 0.5f;
+    v *= 1 + ((view ? -u : u) * (0.173228346f));
+    v += 0.5f;
+    u *= (608.f/508.f);
+    u += 0.5f;
+    u -= xdir* 0.07f;  // adjust for the lenses moving over the displays. this value works decently for 0.067m IPD
     //u*= 0.5;
     //v*= 0.5;
 
@@ -346,14 +352,14 @@ pimax_compute_distortion(
     out_result->g.y = v;
     out_result->b.x = u;
     out_result->b.y = v;
-    
+
     struct u_vive_values pimaxLeft = {
         .aspect_x_over_y = 1.65f,
         .grow_for_undistort = 0.6f,
         .center = {
-            {xdir * 0.2f, 0.0f},
-            {xdir * 0.2f, 0.0f},
-            {xdir * 0.2f, 0.0f},
+            {xdir * 0.0f, 0.0f},
+            {xdir * 0.0f, 0.0f},
+            {xdir * 0.0f, 0.0f},
         },
         .coefficients = {
             {0.60168104f, -0.00836374f, 0.08422303f, 0.0f},
@@ -361,7 +367,7 @@ pimax_compute_distortion(
             {0.60168104f, -0.00836374f, 0.08422303f, 0.0f},
         },
     };
-    u_compute_distortion_ndvive(&pimaxLeft, u, v, -0.0f*xdir, -0.02637853, 0.03973991, out_result);
+    u_compute_distortion_ndvive(&pimaxLeft, u, v, 0.0f, -0.02637853, 0.03973991, out_result);
     //U_LOG_D("Distortion %f:%f is now %f:%f\n", u, v, out_result->r.x, out_result->r.y);
     return XRT_SUCCESS;
 }
