@@ -268,8 +268,8 @@ long init_pimax8kx(struct fixup_context* ctx, struct fixup_func_list* funcs, str
     // pure guesses, likely wrong
     /*xrtdev->hmd->distortion.fov[0] = (struct xrt_fov){-1., 1., 0.8927, -0.8927};
     xrtdev->hmd->distortion.fov[1] = (struct xrt_fov){-1., 1., 0.8927, -0.8927};*/
-    xrtdev->hmd->distortion.fov[0] = (struct xrt_fov){-1.0611, 1.0611, 0.9037, -0.9037};
-    xrtdev->hmd->distortion.fov[1] = (struct xrt_fov){-1.0611, 1.0611, 0.9037, -0.9037};
+    xrtdev->hmd->distortion.fov[0] = (struct xrt_fov){-1.0611, 1.0611, 0.8537, -0.8537};
+    xrtdev->hmd->distortion.fov[1] = (struct xrt_fov){-1.0611, 1.0611, 0.8537, -0.8537};
 
 	xrtdev->get_view_poses = pimax_get_view_poses;
 	xrtdev->hmd->blend_modes[0] = XRT_BLEND_MODE_OPAQUE;
@@ -310,7 +310,7 @@ pimax_get_view_poses(struct xrt_device *xdev,
     struct pimax_device *dev = (struct pimax_device *)xdev;
     struct xrt_vec3 eye_relation = *default_eye_relation;
 
-    eye_relation.x = dev->device_config.separation;
+    eye_relation.x = dev->device_config.ipd;
 
     xrt_result_t xret = u_device_get_view_poses( //
         xdev,                                    //
