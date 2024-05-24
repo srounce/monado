@@ -522,7 +522,10 @@ void render_update_distortion_mesh(struct xrt_device *xdev){
 	    vbo,                   // buffer
 	    vertices,              // data
 	    vbo_size);             // size
-	VK_CHK_WITH_RET(ret, "render_buffer_write", false);
+	if (ret != VK_SUCCESS) {
+		vk_print_result(vk, __FILE__, __LINE__, __func__, ret, "render_buffer_write");
+		return;
+	}
 }
 
 /*
