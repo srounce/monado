@@ -499,7 +499,7 @@ teardown_scratch_color_image(struct vk_bundle *vk, struct render_scratch_color_i
 	DF(Memory, rsci->device_memory);
 }
 
-void render_update_distortion_mesh(struct xrt_device *xdev){
+bool render_update_distortion_mesh(struct xrt_device *xdev){
 
 	VkResult ret;
 
@@ -508,14 +508,6 @@ void render_update_distortion_mesh(struct xrt_device *xdev){
 	uint32_t vertex_count = xdev->hmd->distortion.mesh.vertex_count;
 	void* vertices = xdev->hmd->distortion.mesh.vertices;
 	struct render_buffer* vbo = xdev->hmd->distortion.vbo;
-	U_LOG_D("Updating distortion VBO");
-
-
-	// Using the same flags for all vbos.
-	VkBufferUsageFlags vbo_usage_flags = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-	VkBufferUsageFlags ibo_usage_flags = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-	VkMemoryPropertyFlags memory_property_flags =
-	    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
 
 	// Distortion vbo and ibo sizes.
 	VkDeviceSize vbo_size = stride * vertex_count;
@@ -525,10 +517,8 @@ void render_update_distortion_mesh(struct xrt_device *xdev){
 	    vbo,                   // buffer
 	    vertices,              // data
 	    vbo_size);             // size
-	if (ret != VK_SUCCESS) {
-		vk_print_result(vk, __FILE__, __LINE__, __func__, ret, "render_buffer_write");
-		return;
-	}
+	VK_CHK_WITH_RET(ret, "render_buffer_write", false);
+	return true;
 }
 
 /*
