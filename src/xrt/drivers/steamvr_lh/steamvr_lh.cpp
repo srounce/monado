@@ -43,9 +43,7 @@
 #include <filesystem>
 #include <istream>
 
-extern "C"{
 #include "fixup/fixup.h"
-}
 namespace {
 
 // based on the logic at
