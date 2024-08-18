@@ -34,9 +34,7 @@
 
 #include "math/m_api.h"
 
-extern "C"{
 #include "fixup/fixup.h"
-}
 namespace {
 
 // based on the logic at
