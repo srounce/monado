@@ -888,6 +888,7 @@ void patch_pimax8kx(struct fixup_device* fdev, struct fixup_context* ctx, struct
 
 	struct xrt_device* multidev = multi_create_tracking_override(XRT_TRACKING_OVERRIDE_DIRECT,
 		&dev->base.base, xsysd->static_roles.head, XRT_INPUT_GENERIC_HEAD_POSE, &ident);
+    xsysd->static_roles.head->device_type = XRT_DEVICE_TYPE_UNKNOWN;    // make u_device_assign_xdev_roles work correctly
 	xsysd->static_roles.head = multidev;
     xsysd->static_xdevs[xsysd->static_xdev_count++] = multidev;
 
