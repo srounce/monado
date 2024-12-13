@@ -73,4 +73,6 @@ if(XRT_MODULE_AUX_RENDER)
 endif()
 
 # additional init/fixup routines
+if(XRT_HAVE_HIDAPI)
 add_subdirectory(fixup)
+endif()
