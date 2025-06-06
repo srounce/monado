@@ -15,7 +15,7 @@ long init_vivepro2(struct fixup_context* ctx, struct fixup_func_list* funcs, str
 
     hid_device* hid;
     hid = hid_open(VP2_VID, VP2_PID, NULL);
-    if(hid){
+    if(!hid){
         U_LOG_E("Failed to open VP2 HID device");
 		return 0;
     }
