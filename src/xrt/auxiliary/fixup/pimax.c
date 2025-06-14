@@ -38,6 +38,7 @@ DEBUG_GET_ONCE_FLOAT_OPTION(pimax_img_offs_x_r, "PIMAX_OFFS_X_R", 0.0)
 DEBUG_GET_ONCE_FLOAT_OPTION(pimax_img_offs_x_g, "PIMAX_OFFS_X_G", 0.0)
 DEBUG_GET_ONCE_FLOAT_OPTION(pimax_img_offs_x_b, "PIMAX_OFFS_X_B", 0.0)
 
+DEBUG_GET_ONCE_BOOL_OPTION(pimax_check_init, "PIMAX_CHECK_INIT", false)
 
 // for loading meshes from json files instead of having them compiled in
 #define PIMAX_MESHES_DEFAULT_PATH ".config/pimax/meshes"
@@ -58,6 +59,7 @@ void init_display_p2c(struct pimax_device* dev);
 
 struct pimax_model_config model_configs[] = {
     {L"Pimax P2EA", "Pimax 8K Plus", "p2ea.json", {pimax_p2ea_get_display_props, init_display_8kx}},
+    {L"Pimax P2E", "Pimax 8K Plus", "p2e.json", {pimax_p2ea_get_display_props, init_display_p2c}},
     {L"Pimax P2A", "Pimax 5K Super", "p2a.json", {pimax_5ks_get_display_props, init_display_8kx}},
     {L"Pimax P2C", "Pimax 5K Super", "p2c.json", {pimax_p2c_get_display_props, init_display_p2c}},
     {L"Pimax P2N", "Pimax 8KX", "p2n.json", {pimax_8kx_get_display_props, init_display_8kx}},
@@ -481,6 +483,21 @@ pimax_compute_distortion_from_mesh(
     return XRT_SUCCESS;
 }
 
+bool pimax_get_power_status(hid_device* hid){
+    if(hid_send_feature_report(hid, pimax_poll_freq, sizeof(pimax_poll_freq)) == -1){
+        U_LOG_E("Failed to send polling frequency report: %ls", hid_error(hid));
+        return false; // without this report sent, no data can be polled, assume no init
+    }
+
+    uint8_t buf[64] = {240, };
+    if(hid_get_feature_report(hid, buf, 64) == -1){
+        U_LOG_E("Failed to read status report: %ls", hid_error(hid));
+        return false;
+    }
+
+    return buf[0x37] == 1;  // check exactly for 1, just as a safeguard against potentially different structs
+}
+
 void pimax_8kx_poll(struct pimax_device* dev){
     //U_LOG_D("Pimax poll");
     bool update_distortion = dev->always_update_distortion;
@@ -800,7 +817,12 @@ long init_pimax8kx(struct fixup_context* ctx, struct fixup_func_list* funcs, str
     }
 
 
-    dev->model_funcs->init_display(dev);
+    if(!debug_get_bool_option_pimax_check_init() || !pimax_get_power_status(dev->hid_dev)){
+        // doing init again apparently causes issues on some models
+        // a full reboot of the HMD would be an alternative (pimax does this), but this is cleaner imo
+        U_LOG_D("Sending initialization packets to HMD");
+        dev->model_funcs->init_display(dev);
+    }
     pimax_8kx_read_config(dev);
     os_mutex_unlock(&dev->hid_mutex);
 
