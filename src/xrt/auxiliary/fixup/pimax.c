@@ -39,6 +39,8 @@ DEBUG_GET_ONCE_FLOAT_OPTION(pimax_img_offs_x_g, "PIMAX_OFFS_X_G", 0.0)
 DEBUG_GET_ONCE_FLOAT_OPTION(pimax_img_offs_x_b, "PIMAX_OFFS_X_B", 0.0)
 
 DEBUG_GET_ONCE_BOOL_OPTION(pimax_check_init, "PIMAX_CHECK_INIT", false)
+DEBUG_GET_ONCE_BOOL_OPTION(pimax_reboot, "PIMAX_REBOOT", false)
+DEBUG_GET_ONCE_NUM_OPTION(pimax_reboot_delay, "PIMAX_REBOOT_DELAY_MS", 5000)
 
 // for loading meshes from json files instead of having them compiled in
 #define PIMAX_MESHES_DEFAULT_PATH ".config/pimax/meshes"
@@ -95,6 +97,13 @@ uint8_t pimax_keepalive[64] = {
 
 uint8_t pimax_hmd_power[64] = {
     0xF0, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+uint8_t pimax_reboot[64] = {
+    0xF0, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -760,6 +769,18 @@ void init_display_p2c(struct pimax_device* dev){
     hid_send_feature_report(dev->hid_dev, pimax_init2, sizeof(pimax_init2));
 }
 
+void pimax_open_hid(hid_device** dev){
+    int attempts = 0;
+    do{
+        if(attempts){
+            U_LOG_W("Failed to open Pimax HID device, retrying");
+            os_nanosleep(debug_get_num_option_pimax_hid_delay() * U_TIME_1MS_IN_NS);
+        }
+	    *dev = hid_open(PIMAX_VID, PIMAX_8KX_PID, NULL);
+        attempts++;
+    } while(!*dev && attempts < debug_get_num_option_pimax_hid_retry());
+}
+
 long init_pimax8kx(struct fixup_context* ctx, struct fixup_func_list* funcs, struct hid_device_info* devinfo){
     if(devinfo->interface_number) return 0;
 
@@ -774,15 +795,7 @@ long init_pimax8kx(struct fixup_context* ctx, struct fixup_func_list* funcs, str
     U_LOG_D("Pimax 8KX init\n");
     os_mutex_lock(&dev->hid_mutex);
 	dev->hid_dev = NULL;
-    int attempts = 0;
-    do{
-        if(attempts){
-            U_LOG_W("Failed to open Pimax HID device, retrying");
-            os_nanosleep(debug_get_num_option_pimax_hid_delay() * U_TIME_1MS_IN_NS);
-        }
-	    dev->hid_dev = hid_open(PIMAX_VID, PIMAX_8KX_PID, NULL);
-        attempts++;
-    } while(!dev->hid_dev && attempts < debug_get_num_option_pimax_hid_retry());
+    pimax_open_hid(&dev->hid_dev);
 	if(!dev->hid_dev){
         os_mutex_unlock(&dev->hid_mutex);
         os_mutex_destroy(&dev->hid_mutex);
@@ -790,6 +803,23 @@ long init_pimax8kx(struct fixup_context* ctx, struct fixup_func_list* funcs, str
 		U_LOG_E("Failed to open Pimax 8KX HID device");
 		return 0;
 	}
+
+    if(debug_get_bool_option_pimax_reboot()){
+        U_LOG_I("Rebooting Pimax HMD");
+        hid_send_feature_report(dev->hid_dev, pimax_reboot, sizeof(pimax_reboot));
+        hid_close(dev->hid_dev);
+        dev->hid_dev = NULL;
+        os_nanosleep(debug_get_num_option_pimax_reboot_delay() * U_TIME_1MS_IN_NS);
+        pimax_open_hid(&dev->hid_dev);
+
+        if(!dev->hid_dev){
+            os_mutex_unlock(&dev->hid_mutex);
+            os_mutex_destroy(&dev->hid_mutex);
+		    free(dev);
+		    U_LOG_E("Failed to open Pimax HID device after rebooting");
+		    return 0;
+        }
+    }
 
     wchar_t buf[PIMAX_MODEL_NAME_LENGTH];
     if(hid_get_product_string(dev->hid_dev, buf, ARRAY_SIZE(buf)) == -1){
