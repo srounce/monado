@@ -69,6 +69,7 @@ struct pimax_model_config model_configs[] = {
     {L"Pimax P2D", "Pimax 5K+", "p2d.json", {pimax_p2d_get_display_props, init_display_8kx}},
     {L"Pimax P2B", "Pimax 5K XR", "p2b.json", {pimax_p2b_get_display_props, init_display_8kx}},
     {L"Pimax P2Z", "Pimax 5K Super", "p2z.json", {pimax_p2z_get_display_props, init_display_8kx}},
+    {L"Pimax P2F", "Pimax 5K Super", "p2f.json", {pimax_p2z_get_display_props, init_display_8kx}},
 };
 
 
