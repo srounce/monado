@@ -13,6 +13,7 @@
 
 #include "math/m_vec2.h"
 #include "math/m_api.h"
+#include "xrt/xrt_results.h"
 
 #include <cjson/cJSON.h>
 
@@ -874,6 +875,9 @@ long init_pimax8kx(struct fixup_context* ctx, struct fixup_func_list* funcs, str
 	xrtdev->get_view_poses = pimax_get_view_poses;
 	xrtdev->hmd->blend_modes[0] = XRT_BLEND_MODE_OPAQUE;
 	xrtdev->hmd->blend_mode_count = 1;	// need to check this again
+	xrtdev->supported.stage = false;
+	xrtdev->supported.orientation_tracking = true;
+	xrtdev->supported.position_tracking = true;
     /*
      * the hmd doesn't actually have any inputs, but the IPC client doesn't like that
      */
@@ -997,7 +1001,6 @@ pimax_get_view_poses(struct xrt_device *xdev,
     // ONLY WORKS IF LIGHTHOUSES ARE ON!!!
     out_poses[0].orientation = (struct xrt_quat){0,0.0871557, 0, 0.996195};
     out_poses[1].orientation = (struct xrt_quat){0,-0.0871557, 0, 0.996195};
-
     return XRT_SUCCESS;
 }
 // width and height here refer to how the displays are located in the hmd
