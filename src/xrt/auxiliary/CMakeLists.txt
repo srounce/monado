@@ -61,9 +61,3 @@ endif()
 if(XRT_HAVE_VULKAN)
 	add_subdirectory(vk)
 endif()
-
-
-# additional init/fixup routines
-if(XRT_HAVE_HIDAPI)
-add_subdirectory(fixup)
-endif()

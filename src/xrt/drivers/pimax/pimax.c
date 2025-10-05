@@ -126,14 +126,14 @@ pimax_get_view_poses(struct xrt_device *xdev,
  *  About the display properties specified here (and in the distortion files):
  *
  *  The resolution specified is per eye, and rotated. This makes it easier to populate the views.
- *  
+ *
  *  Example:
  *      If a headset reports a resolution of 2880x2160 and has the usual layout of the P2 series
  *      (two portrait mode panels side by side, I'm not aware of headsets with a different layout),
  *      The height of the screen is the width of the view, and half the width of the screen is the
  *      height of the view.
  *      [headset] 2880x2160 -> [view, display props, json] 2160x1440
- * 
+ *
  **/
 
 void pimax_8kx_get_display_props(struct pimax_device* dev, struct pimax_display_properties* out_props){
@@ -339,7 +339,7 @@ void pimax_update_fovs_from_mesh(struct pimax_device* dev){
         } else {
             seperation += dev->device_config.offset_h_1.val*2;
         }
-        
+
         int lower_mesh_idx = -1;
         int upper_mesh_idx = -1;
         // this assumes the entries are sorted with ascending lens separation
@@ -360,7 +360,7 @@ void pimax_update_fovs_from_mesh(struct pimax_device* dev){
             lower_mesh_idx = upper_mesh_idx = dev->mesh_set->mesh_count - 1;
             if(dev->mesh_set->mesh_count > 1)
                 lower_mesh_idx--;
-        }    
+        }
         float range = dev->mesh_set->meshes[upper_mesh_idx].ipd - dev->mesh_set->meshes[lower_mesh_idx].ipd;
         float amount = (seperation - dev->mesh_set->meshes[upper_mesh_idx].ipd) / range;
 
@@ -422,8 +422,8 @@ pimax_compute_distortion_from_mesh(
         if(dev->mesh_set->mesh_count > 1)
             upper_mesh_idx = 1;
     }
-    /*U_LOG_D("Using meshes with IPDs %f and %f for IPD %f", dev->mesh_set->meshes[lower_mesh_idx].ipd, 
-        dev->mesh_set->meshes[upper_mesh_idx].ipd, 
+    /*U_LOG_D("Using meshes with IPDs %f and %f for IPD %f", dev->mesh_set->meshes[lower_mesh_idx].ipd,
+        dev->mesh_set->meshes[upper_mesh_idx].ipd,
         seperation);*/
     float range = dev->mesh_set->meshes[upper_mesh_idx].ipd - dev->mesh_set->meshes[lower_mesh_idx].ipd;
     struct xrt_vec2 pos = {u, v};
@@ -478,7 +478,7 @@ pimax_compute_distortion_from_mesh(
 
     }
     if(upper_mesh_idx == lower_mesh_idx){
-        *out_result = triplets[0];    
+        *out_result = triplets[0];
     } else {
         float amount = (seperation - dev->mesh_set->meshes[upper_mesh_idx].ipd) / range;
         *out_result = uv_triplet_lerp(triplets[0], triplets[1], amount);
@@ -642,7 +642,7 @@ size_t pimax_get_mesh_path(struct pimax_device* dev, size_t max_len, char* out_p
         }
         outlen++;
     }
-    
+
     // file
     if(getenv(PIMAX_MESH_NAME_ENV_VAR)){
         if(max_len > outlen){
@@ -836,7 +836,7 @@ long init_pimax8kx(struct fixup_context* ctx, struct fixup_func_list* funcs, str
     for(size_t i = 0; i < ARRAY_SIZE(model_configs); i++){
         if(wcsncmp(buf, model_configs[i].product_name, PIMAX_MODEL_NAME_LENGTH) == 0){
             dev->model_funcs = &model_configs[i].funcs;
-            strncpy(dev->base.base.str, model_configs[i].display_name, 
+            strncpy(dev->base.base.str, model_configs[i].display_name,
                 (PIMAX_MODEL_NAME_LENGTH<XRT_DEVICE_NAME_LEN?PIMAX_MODEL_NAME_LENGTH:XRT_DEVICE_NAME_LEN)-1);
                 found_match = true;
             dev->default_mesh_name = model_configs[i].default_mesh_name;
@@ -947,32 +947,28 @@ pimax_get_view_poses(struct xrt_device *xdev,
                      struct xrt_fov *out_fovs,
                      struct xrt_pose *out_poses)
 {
+    (void)at_timestamp_ns;
+    (void)view_type;
+
     struct pimax_device *dev = (struct pimax_device *)xdev;
     struct xrt_vec3 eye_relation = *default_eye_relation;
-    struct xrt_vec3 newEyeRelation = eye_relation;
-
     eye_relation.x = dev->device_config.ipd;
-    newEyeRelation.x = dev->device_config.ipd;
 
-    xrt_result_t xret = u_device_get_view_poses( //
-        xdev,                                    //
-        &eye_relation,                           //
-        at_timestamp_ns,                         //
-        view_type,                               //
-        view_count,                              //
-        out_head_relation,                       //
-        out_fovs,                                //
-        out_poses);                              //
-    if (xret != XRT_SUCCESS) {
-        return xret;
+    if (out_head_relation != NULL) {
+        *out_head_relation = (struct xrt_space_relation)XRT_SPACE_RELATION_ZERO;
     }
 
-    for(uint32_t view_index = 0; view_index < view_count; view_index++){
+    for (uint32_t i = 0; i < view_count && i < ARRAY_SIZE(xdev->hmd->views); i++) {
+        out_fovs[i] = xdev->hmd->distortion.fov[i];
+    }
+
+    for (uint32_t view_index = 0; view_index < view_count; view_index++) {
+        out_poses[view_index] = (struct xrt_pose)XRT_POSE_IDENTITY;
         bool adjust = view_index == 0;
 
         float v_adjust = 0.0f;
         float h_adjust = 0.0f;
-        if(view_index == 0){
+        if (view_index == 0) {
             h_adjust = dev->device_config.offset_h_0.val;
             v_adjust = dev->device_config.offset_v_0.val;
         } else {
@@ -980,9 +976,9 @@ pimax_get_view_poses(struct xrt_device *xdev,
             v_adjust = dev->device_config.offset_v_1.val;
         }
 
-	    out_poses[view_index].position.x = (newEyeRelation.x / 2.0f) + h_adjust;
-	    out_poses[view_index].position.y = (newEyeRelation.y / 2.0f) + v_adjust;
-	    out_poses[view_index].position.z = newEyeRelation.z / 2.0f;
+	    out_poses[view_index].position.x = (eye_relation.x / 2.0f) + h_adjust;
+	    out_poses[view_index].position.y = (eye_relation.y / 2.0f) + v_adjust;
+	    out_poses[view_index].position.z = eye_relation.z / 2.0f;
 
 	    // Adjust for left/right while also making sure there aren't any -0.f.
 	    if (out_poses[view_index].position.x != 0.0f && adjust) {
@@ -996,8 +992,7 @@ pimax_get_view_poses(struct xrt_device *xdev,
 	    }
     }
 
-    //U_LOG_D("get view poses\n");
-    // canted displays, based on PiTools output 
+    // canted displays, based on PiTools output
     // ONLY WORKS IF LIGHTHOUSES ARE ON!!!
     out_poses[0].orientation = (struct xrt_quat){0,0.0871557, 0, 0.996195};
     out_poses[1].orientation = (struct xrt_quat){0,-0.0871557, 0, 0.996195};
@@ -1058,9 +1053,9 @@ void patch_pimax8kx(struct fixup_device* fdev, struct fixup_context* ctx, struct
     u_var_add_gui_header(dev, NULL, "Horizontal offset: ");
     u_var_add_draggable_f32(dev, &dev->device_config.offset_h_0, "Left H");
     u_var_add_draggable_f32(dev, &dev->device_config.offset_h_1, "Right H");
-    
+
     u_var_add_gui_header(dev, NULL, "Vertical offset: ");
     u_var_add_draggable_f32(dev, &dev->device_config.offset_v_0, "Left V");
     u_var_add_draggable_f32(dev, &dev->device_config.offset_v_1, "Right V");
-    
+
 }
