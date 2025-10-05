@@ -43,7 +43,7 @@
 #include <filesystem>
 #include <istream>
 
-#include "fixup/fixup.h"
+#include "pimax/fixup.h"
 namespace {
 
 // based on the logic at

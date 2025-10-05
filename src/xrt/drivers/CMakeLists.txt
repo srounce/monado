@@ -633,6 +633,11 @@ if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE OR XRT_BUILD_DRIVER_SURVIVE)
 endif()
 
 if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE)
+	# there is no real dependency on the lighthouse driver in there, but it isn't
+	# hooked up anywhere else currently
+	if(XRT_HAVE_HIDAPI)
+		add_subdirectory(pimax)
+	endif()
 	add_library(
 		drv_steamvr_lh STATIC
 		steamvr_lh/steamvr_lh.cpp
@@ -653,7 +658,7 @@ if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE)
 			drv_vp2
 			drv_includes
 			base
-			aux_fixup
+			drv_pimax
 			xrt-interfaces
 			xrt-external-openvr
 			xrt-external-cjson
