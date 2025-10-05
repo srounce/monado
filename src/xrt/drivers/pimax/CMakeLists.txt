@@ -6,7 +6,6 @@ add_library(
 	fixup.c
 	pimax.c
 	fixup_list.c
-	vp2.c
 	)
 target_link_libraries(
 	drv_pimax
