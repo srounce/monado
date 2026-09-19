@@ -94,6 +94,8 @@ DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_a_x, "BIGEYE_CROP_A_X", BIGEYE_CROP_A_X)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_b_x, "BIGEYE_CROP_B_X", BIGEYE_CROP_B_X)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_y, "BIGEYE_CROP_Y", BIGEYE_CROP_Y)
 DEBUG_GET_ONCE_OPTION(bigeye_dump, "BIGEYE_DUMP", NULL)
+// Training capture: every preprocessed frame pair with its timestamp, raw.
+DEBUG_GET_ONCE_OPTION(bigeye_capture, "BIGEYE_CAPTURE", NULL)
 // Eye image orientation relative to what the model was trained on. The Beyond
 // 2e cameras are mirrored versus the reference rig; with the wrong orientation
 // one eye's yaw inverts and the lid-weighted average cancels most of it.
@@ -163,6 +165,9 @@ struct bigeye_device
 	//! this path every few frames, for offline crop inspection.
 	const char *dump_path;
 	int dump_counter;
+
+	//! Training capture stream, see BIGEYE_CAPTURE.
+	FILE *capture;
 
 	//! Per-user fit from the calibration tool: measured = gain * true + bias,
 	//! inverted here. Identity when no calibration file is present.
@@ -461,6 +466,13 @@ bigeye_sink_push_frame(struct xrt_frame_sink *xfs, struct xrt_frame *xf)
 		bigeye_dump_inputs(d);
 	}
 
+	if (d->capture != NULL) {
+		int64_t ts = xf->timestamp;
+		fwrite(&ts, sizeof(ts), 1, d->capture);
+		fwrite(d->ring[d->ring_head][0], 1, BIGEYE_INPUT_SIZE * BIGEYE_INPUT_SIZE, d->capture);
+		fwrite(d->ring[d->ring_head][1], 1, BIGEYE_INPUT_SIZE * BIGEYE_INPUT_SIZE, d->capture);
+	}
+
 	if (d->ring_count < BIGEYE_INPUT_FRAMES) {
 		d->ring_count++;
 		if (d->ring_count < BIGEYE_INPUT_FRAMES) {
@@ -654,6 +666,9 @@ bigeye_destroy(struct xrt_device *xdev)
 	if (d->inference != NULL) {
 		bigeye_inference_destroy(&d->inference);
 	}
+	if (d->capture != NULL) {
+		fclose(d->capture);
+	}
 	if (d->history != NULL) {
 		m_relation_history_destroy(&d->history);
 	}
@@ -730,6 +745,12 @@ bigeye_device_create(struct xrt_device *head)
 	d->crop_b_x = (int)debug_get_num_option_bigeye_crop_b_x();
 	d->crop_y = (int)debug_get_num_option_bigeye_crop_y();
 	d->dump_path = debug_get_option_bigeye_dump();
+	if (debug_get_option_bigeye_capture() != NULL) {
+		d->capture = fopen(debug_get_option_bigeye_capture(), "wb");
+		if (d->capture == NULL) {
+			U_LOG_IFL_W(log_level, "Cannot open capture file %s", debug_get_option_bigeye_capture());
+		}
+	}
 	d->flip_a = debug_get_bool_option_bigeye_flip_a();
 	d->flip_b = debug_get_bool_option_bigeye_flip_b();
 	d->swap_eyes = debug_get_bool_option_bigeye_swap();

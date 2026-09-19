@@ -25,6 +25,7 @@
 #include <vulkan/vulkan.h>
 
 #define XR_USE_GRAPHICS_API_VULKAN
+#define XR_USE_TIMESPEC
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
@@ -407,19 +408,27 @@ int
 main(int argc, char **argv)
 {
 	bool follow = argc > 1 && strcmp(argv[1], "follow") == 0;
+	bool record = argc > 2 && strcmp(argv[1], "record") == 0;
+	const char *record_path = record ? argv[2] : NULL;
 	setvbuf(stdout, NULL, _IONBF, 0);
 
 	/*
 	 * Instance, system.
 	 */
-	const char *exts[] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, "XR_EXT_eye_gaze_interaction"};
+	const char *exts[] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, "XR_EXT_eye_gaze_interaction",
+	                      XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME};
 	XrInstanceCreateInfo ici = {.type = XR_TYPE_INSTANCE_CREATE_INFO,
 	                            .applicationInfo = {.applicationName = "bigeye_calib",
 	                                                .apiVersion = XR_API_VERSION_1_0},
-	                            .enabledExtensionCount = 2,
+	                            .enabledExtensionCount = 3,
 	                            .enabledExtensionNames = exts};
 	XrInstance instance;
 	CK(xrCreateInstance(&ici, &instance));
+
+	// Record mode logs CLOCK_MONOTONIC so labels join directly with the
+	// driver capture, which stamps frames with the same clock.
+	PFN_xrConvertTimeToTimespecTimeKHR to_timespec = NULL;
+	xrGetInstanceProcAddr(instance, "xrConvertTimeToTimespecTimeKHR", (PFN_xrVoidFunction *)&to_timespec);
 
 	XrSystemGetInfo sgi = {.type = XR_TYPE_SYSTEM_GET_INFO, .formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY};
 	XrSystemId system_id;
@@ -530,8 +539,108 @@ main(int argc, char **argv)
 		}
 	}
 
-	if (!follow) {
+	if (!follow && !record) {
 		printf("Follow the dark square with your eyes, keep your head still.\n");
+	}
+
+	/*
+	 * Record mode: the dot does slow smooth pursuit over the gaze range while
+	 * the target angles are logged per frame with the display timestamp, so
+	 * they can be joined against the driver's BIGEYE_CAPTURE frames to train
+	 * a per-user model. Ends with an eyes-closed segment for lid labels.
+	 */
+	if (record) {
+		const char *secs_env = getenv("BIGEYE_RECORD_SECONDS");
+		double pursuit_s = secs_env != NULL ? atof(secs_env) : 120.0;
+		const double lead_s = 3.0, blink_s = 15.0;
+		FILE *log = fopen(record_path, "w");
+		if (log == NULL) {
+			fprintf(stderr, "cannot write %s\n", record_path);
+			return 1;
+		}
+		XrActiveActionSet active_r = {.actionSet = action_set};
+		XrActionsSyncInfo asi_r = {.type = XR_TYPE_ACTIONS_SYNC_INFO,
+		                           .countActiveActionSets = 1,
+		                           .activeActionSets = &active_r};
+		XrTime start = 0;
+		printf("Record mode: %.0f s pursuit then %.0f s eyes closed.\n", pursuit_s, blink_s);
+		printf("Follow the red dot smoothly. When it disappears, close your eyes until the run ends.\n");
+
+		while (true) {
+			XrEventDataBuffer ev = {.type = XR_TYPE_EVENT_DATA_BUFFER};
+			while (xrPollEvent(instance, &ev) == XR_SUCCESS) {
+				ev.type = XR_TYPE_EVENT_DATA_BUFFER;
+			}
+			XrFrameState fs = {.type = XR_TYPE_FRAME_STATE};
+			CK(xrWaitFrame(session, NULL, &fs));
+			CK(xrBeginFrame(session, NULL));
+			if (start == 0) {
+				start = fs.predictedDisplayTime;
+			}
+			double t = (fs.predictedDisplayTime - start) / 1e9;
+			bool closed = t > lead_s + pursuit_s;
+			if (t > lead_s + pursuit_s + blink_s) {
+				XrFrameEndInfo fei = {.type = XR_TYPE_FRAME_END_INFO,
+				                      .displayTime = fs.predictedDisplayTime,
+				                      .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
+				CK(xrEndFrame(session, &fei));
+				break;
+			}
+
+			// Incommensurate periods sweep the whole range; max about 12 deg/s.
+			double u = t < lead_s ? 0.0 : t - lead_s;
+			double yaw = closed ? 0.0 : 25.0 * sin(2.0 * M_PI * u / 13.0);
+			double pitch = closed ? 0.0 : 15.0 * sin(2.0 * M_PI * u / 8.3);
+
+			// Keeping the gaze space in use keeps the driver processing frames,
+			// which is what feeds BIGEYE_CAPTURE. The live gaze is logged too.
+			CK(xrSyncActions(session, &asi_r));
+			double gy = 0, gp = 0;
+			XrSpaceLocation loc = {.type = XR_TYPE_SPACE_LOCATION};
+			if (XR_SUCCEEDED(xrLocateSpace(gaze_space, view_space, fs.predictedDisplayTime, &loc)) &&
+			    (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT)) {
+				gaze_angles_from_quat(loc.pose.orientation, &gy, &gp);
+			}
+			struct timespec mono = {0};
+			if (to_timespec != NULL) {
+				to_timespec(instance, fs.predictedDisplayTime, &mono);
+			}
+			long long mono_ns = (long long)mono.tv_sec * 1000000000LL + mono.tv_nsec;
+			fprintf(log, "%lld %.3f %.3f %d %.2f %.2f\n", mono_ns, yaw, pitch, closed ? 1 : 0, gy, gp);
+
+			solid_swapchain_present(&vk, &bg_sc);
+			solid_swapchain_present(&vk, &dot_sc);
+
+			XrCompositionLayerQuad bg_quad = {
+			    .type = XR_TYPE_COMPOSITION_LAYER_QUAD,
+			    .space = view_space,
+			    .eyeVisibility = XR_EYE_VISIBILITY_BOTH,
+			    .subImage = {.swapchain = bg_sc.swapchain, .imageRect = {.extent = {64, 64}}},
+			    .pose = {.orientation = {.w = 1}, .position = {0, 0, -2.0f}},
+			    .size = {8.0f, 8.0f},
+			};
+			XrCompositionLayerQuad dot = {
+			    .type = XR_TYPE_COMPOSITION_LAYER_QUAD,
+			    .space = view_space,
+			    .eyeVisibility = XR_EYE_VISIBILITY_BOTH,
+			    .subImage = {.swapchain = dot_sc.swapchain, .imageRect = {.extent = {16, 16}}},
+			    .pose = quad_pose_from_angles(yaw, pitch),
+			    .size = {0.015f, 0.015f},
+			};
+			const XrCompositionLayerBaseHeader *layers[] = {(XrCompositionLayerBaseHeader *)&bg_quad,
+			                                                (XrCompositionLayerBaseHeader *)&dot};
+			XrFrameEndInfo fei = {.type = XR_TYPE_FRAME_END_INFO,
+			                      .displayTime = fs.predictedDisplayTime,
+			                      .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE,
+			                      .layerCount = fs.shouldRender ? (closed ? 1 : 2) : 0,
+			                      .layers = layers};
+			CK(xrEndFrame(session, &fei));
+		}
+		fclose(log);
+		printf("wrote %s\n", record_path);
+		xrDestroySession(session);
+		xrDestroyInstance(instance);
+		return 0;
 	}
 
 	/*
