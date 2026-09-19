@@ -32,6 +32,10 @@
 #include "steamvr_lh/steamvr_lh_interface.h"
 #include "xrt/xrt_results.h"
 
+#ifdef XRT_BUILD_DRIVER_BIGEYE
+#include "bigeye/bigeye_interface.h"
+#endif
+
 #include "xrt/xrt_space.h"
 #include "b_space_overseer.h"
 
@@ -146,6 +150,19 @@ steamvr_open_system_impl(struct xrt_builder *xb,
 #undef SET_HT_ROLES
 
 	tbo->head = xsysd->static_xdevs[head];
+
+#ifdef XRT_BUILD_DRIVER_BIGEYE
+	if (eyes == XRT_DEVICE_ROLE_UNASSIGNED) {
+		struct xrt_device *eye_dev = bigeye_device_create(tbo->head);
+		if (eye_dev != NULL) {
+			xsysd->static_xdevs[xsysd->static_xdev_count++] = eye_dev;
+			eyes = (int)(xsysd->static_xdev_count - 1);
+		}
+	}
+#endif
+	if (eyes != XRT_DEVICE_ROLE_UNASSIGNED) {
+		tbo->eyes = xsysd->static_xdevs[eyes];
+	}
 
 	if (left != XRT_DEVICE_ROLE_UNASSIGNED) {
 		tbo->left = xsysd->static_xdevs[left];

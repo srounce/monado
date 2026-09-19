@@ -154,6 +154,32 @@ if(XRT_BUILD_DRIVER_UVC)
 	list(APPEND ENABLED_DRIVERS uvc)
 endif()
 
+if(XRT_BUILD_DRIVER_BIGEYE)
+	add_library(
+		drv_bigeye STATIC
+		bigeye/bigeye_interface.h
+		bigeye/bigeye_driver.c
+		bigeye/bigeye_inference.h
+		bigeye/bigeye_inference.cpp
+		)
+	target_link_libraries(
+		drv_bigeye
+		PRIVATE
+			xrt-interfaces
+			aux_os
+			aux_util
+			aux_util_sink
+			aux_math
+			aux_onnx
+			drv_includes
+			drv_uvc
+			ONNXRuntime::ONNXRuntime
+			${LIBUSB1_LIBRARIES}
+		)
+	target_include_directories(drv_bigeye PRIVATE ${LIBUSB1_INCLUDE_DIRS})
+	list(APPEND ENABLED_DRIVERS bigeye)
+endif()
+
 if(XRT_BUILD_DRIVER_ULV2)
 	add_library(drv_ulv2 STATIC ultraleap_v2/ulv2_driver.cpp ultraleap_v2/ulv2_interface.h)
 	target_link_libraries(drv_ulv2 PRIVATE xrt-interfaces aux_util aux_math LeapV2::LeapV2)
