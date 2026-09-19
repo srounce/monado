@@ -362,7 +362,14 @@ bigeye_load_calibration(struct bigeye_device *d)
 
 	char *content = u_file_read_content_from_path(path, NULL);
 	if (content == NULL) {
-		BIGEYE_INFO(d, "No calibration file at %s, using raw gaze mapping", path);
+		if (d->calib.loaded) {
+			BIGEYE_INFO(d, "Calibration file removed, back to raw gaze mapping");
+		} else {
+			BIGEYE_INFO(d, "No calibration file at %s, using raw gaze mapping", path);
+		}
+		d->calib.loaded = false;
+		d->calib.poly = false;
+		d->calib.yaw_offset = d->calib.pitch_offset = 0;
 		return;
 	}
 
@@ -471,9 +478,11 @@ bigeye_sink_push_frame(struct xrt_frame_sink *xfs, struct xrt_frame *xf)
 		d->calib.last_check_ns = xf->timestamp;
 		char path[1024];
 		struct stat st;
-		if (u_file_get_path_in_config_dir("bigeye_calibration.json", path, sizeof(path)) >= 0 &&
-		    stat(path, &st) == 0 && (int64_t)st.st_mtime != d->calib.mtime) {
-			bigeye_load_calibration(d);
+		if (u_file_get_path_in_config_dir("bigeye_calibration.json", path, sizeof(path)) >= 0) {
+			bool present = stat(path, &st) == 0;
+			if ((present && (int64_t)st.st_mtime != d->calib.mtime) || (!present && d->calib.loaded)) {
+				bigeye_load_calibration(d);
+			}
 		}
 	}
 
