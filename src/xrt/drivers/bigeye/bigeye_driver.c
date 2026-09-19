@@ -81,7 +81,14 @@ DEBUG_GET_ONCE_OPTION(bigeye_model, "BIGEYE_EYE_MODEL", NULL)
 DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_scale, "BIGEYE_GAZE_SCALE_DEG", 45.0)
 // The stock model gives little vertical signal on this hardware; bounding the
 // amplified pitch keeps outliers from throwing the gaze far off.
-DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_pitch_limit, "BIGEYE_PITCH_LIMIT_DEG", 10.0)
+DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_pitch_limit, "BIGEYE_PITCH_LIMIT_DEG", 15.0)
+// Extra gain on calibrated pitch: the model has a dead zone around straight
+// ahead so a fit scaled to the extremes compresses the middle.
+DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_pitch_gain, "BIGEYE_PITCH_GAIN", 1.0)
+// One-euro filter tuning. Small saccades vanish below the low-speed cutoff,
+// so this runs more responsive than the eye tracking defaults.
+DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_fcmin, "BIGEYE_FILTER_FCMIN", 3.0)
+DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_beta, "BIGEYE_FILTER_BETA", 0.02)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_size, "BIGEYE_CROP_SIZE", BIGEYE_CROP_SIZE)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_a_x, "BIGEYE_CROP_A_X", BIGEYE_CROP_A_X)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_b_x, "BIGEYE_CROP_B_X", BIGEYE_CROP_B_X)
@@ -140,6 +147,7 @@ struct bigeye_device
 	// Runtime adjustable via u_var until proper calibration exists.
 	float gaze_scale_deg;
 	float pitch_limit_deg;
+	float pitch_gain;
 	float pitch_offset_deg;
 	float yaw_offset_deg;
 	bool flip_pitch;
@@ -309,6 +317,7 @@ bigeye_process_result(struct bigeye_device *d, const float output[BIGEYE_OUTPUT_
 		yaw /= yaw < 0 ? d->calib.yaw_gain_neg : d->calib.yaw_gain_pos;
 	}
 
+	pitch *= d->pitch_gain;
 	float limit = d->pitch_limit_deg * ((float)M_PI / 180.0f);
 	if (limit > 0) {
 		pitch = fminf(fmaxf(pitch, -limit), limit);
@@ -715,6 +724,7 @@ bigeye_device_create(struct xrt_device *head)
 	d->head = head;
 	d->gaze_scale_deg = (float)debug_get_float_option_bigeye_scale();
 	d->pitch_limit_deg = (float)debug_get_float_option_bigeye_pitch_limit();
+	d->pitch_gain = (float)debug_get_float_option_bigeye_pitch_gain();
 	d->crop_size = (int)debug_get_num_option_bigeye_crop_size();
 	d->crop_a_x = (int)debug_get_num_option_bigeye_crop_a_x();
 	d->crop_b_x = (int)debug_get_num_option_bigeye_crop_b_x();
@@ -728,13 +738,14 @@ bigeye_device_create(struct xrt_device *head)
 	os_mutex_init(&d->mutex);
 	os_thread_helper_init(&d->usb_thread);
 	m_relation_history_create(&d->history);
-	m_filter_euro_vec2_init(&d->gaze_filter, M_EURO_FILTER_EYE_TRACKING_FCMIN, M_EURO_FILTER_EYE_TRACKING_FCMIN_D,
-	                        M_EURO_FILTER_EYE_TRACKING_BETA);
+	m_filter_euro_vec2_init(&d->gaze_filter, debug_get_float_option_bigeye_fcmin(),
+	                        M_EURO_FILTER_EYE_TRACKING_FCMIN_D, debug_get_float_option_bigeye_beta());
 
 	u_var_add_root(d, "Bigeye eye tracker", true);
 	u_var_add_log_level(d, &d->log_level, "Log level");
 	u_var_add_f32(d, &d->gaze_scale_deg, "Gaze scale (deg)");
 	u_var_add_f32(d, &d->pitch_limit_deg, "Pitch limit (deg, 0=off)");
+	u_var_add_f32(d, &d->pitch_gain, "Pitch gain");
 	u_var_add_f32(d, &d->pitch_offset_deg, "Pitch offset (deg)");
 	u_var_add_f32(d, &d->yaw_offset_deg, "Yaw offset (deg)");
 	u_var_add_bool(d, &d->flip_pitch, "Flip pitch");
