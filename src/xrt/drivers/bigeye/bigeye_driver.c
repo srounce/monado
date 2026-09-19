@@ -50,6 +50,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 
 #define BIGEYE_VID 0x35bd
@@ -176,6 +177,11 @@ struct bigeye_device
 		bool loaded;
 		bool apply;
 		bool poly;
+		// Session offsets from the recenter routine, applied after the mapping.
+		float yaw_offset, pitch_offset;
+		// Hot reload: the file is re-read when its mtime changes.
+		int64_t mtime;
+		int64_t last_check_ns;
 		// true = c0 + c1*y + c2*p + c3*y*p, degrees.
 		float yaw_poly[4], pitch_poly[4];
 		// Older per-axis format.
@@ -315,6 +321,8 @@ bigeye_process_result(struct bigeye_device *d, const float output[BIGEYE_OUTPUT_
 		}
 		yaw = ny / k;
 		pitch = np / k;
+		yaw -= d->calib.yaw_offset / k;
+		pitch -= d->calib.pitch_offset / k;
 	} else if (d->calib.loaded && d->calib.apply) {
 		pitch -= d->calib.pitch_bias * ((float)M_PI / 180.0f);
 		yaw -= d->calib.yaw_bias * ((float)M_PI / 180.0f);
@@ -349,6 +357,9 @@ bigeye_load_calibration(struct bigeye_device *d)
 		return;
 	}
 
+	struct stat st;
+	d->calib.mtime = stat(path, &st) == 0 ? (int64_t)st.st_mtime : 0;
+
 	char *content = u_file_read_content_from_path(path, NULL);
 	if (content == NULL) {
 		BIGEYE_INFO(d, "No calibration file at %s, using raw gaze mapping", path);
@@ -362,6 +373,10 @@ bigeye_load_calibration(struct bigeye_device *d)
 		return;
 	}
 
+	d->calib.yaw_offset = d->calib.pitch_offset = 0;
+	u_json_get_float(u_json_get(json, "yaw_offset"), &d->calib.yaw_offset);
+	u_json_get_float(u_json_get(json, "pitch_offset"), &d->calib.pitch_offset);
+
 	bool ok;
 	if (u_json_get(json, "yaw_poly") != NULL) {
 		ok = u_json_get_float_array(u_json_get(json, "yaw_poly"), d->calib.yaw_poly, 4) == 4 &&
@@ -374,7 +389,8 @@ bigeye_load_calibration(struct bigeye_device *d)
 		d->calib.poly = true;
 		d->calib.loaded = true;
 		d->calib.apply = true;
-		BIGEYE_INFO(d, "Loaded quadratic calibration from %s", path);
+		BIGEYE_INFO(d, "Loaded quadratic calibration from %s (offset yaw %+.2f pitch %+.2f)", path,
+		            d->calib.yaw_offset, d->calib.pitch_offset);
 		return;
 	}
 	ok = u_json_get_float(u_json_get(json, "yaw_bias"), &d->calib.yaw_bias) &&
@@ -449,6 +465,17 @@ bigeye_sink_push_frame(struct xrt_frame_sink *xfs, struct xrt_frame *xf)
 	os_mutex_lock(&d->mutex);
 	bool enabled = d->feature_enabled;
 	os_mutex_unlock(&d->mutex);
+
+	// Pick up a rewritten calibration (recenter, recalibration) without restart.
+	if (xf->timestamp - d->calib.last_check_ns > U_TIME_1S_IN_NS) {
+		d->calib.last_check_ns = xf->timestamp;
+		char path[1024];
+		struct stat st;
+		if (u_file_get_path_in_config_dir("bigeye_calibration.json", path, sizeof(path)) >= 0 &&
+		    stat(path, &st) == 0 && (int64_t)st.st_mtime != d->calib.mtime) {
+			bigeye_load_calibration(d);
+		}
+	}
 
 	if (!enabled) {
 		d->ring_count = 0;

@@ -409,6 +409,7 @@ main(int argc, char **argv)
 {
 	bool follow = argc > 1 && strcmp(argv[1], "follow") == 0;
 	bool record = argc > 2 && strcmp(argv[1], "record") == 0;
+	bool recenter = argc > 1 && strcmp(argv[1], "recenter") == 0;
 	const char *record_path = record ? argv[2] : NULL;
 	setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -539,9 +540,129 @@ main(int argc, char **argv)
 		}
 	}
 
-	if (!follow && !record) {
+	if (!follow && !record && !recenter) {
 		printf("Follow the dark square with your eyes, keep your head still.\n");
 	}
+
+	/*
+	 * Recenter mode: five seconds on the centre dot, then the mean reported
+	 * gaze is stored as an offset in the calibration file. Corrects the
+	 * session-to-session drift from headset fit without a full calibration.
+	 */
+	if (recenter) {
+		XrActiveActionSet active_c = {.actionSet = action_set};
+		XrActionsSyncInfo asi_c = {.type = XR_TYPE_ACTIONS_SYNC_INFO,
+		                           .countActiveActionSets = 1,
+		                           .activeActionSets = &active_c};
+		XrTime start = 0;
+		double sum_y = 0, sum_p = 0;
+		int count = 0;
+		printf("Recenter: look at the dot.\n");
+		while (true) {
+			XrEventDataBuffer ev = {.type = XR_TYPE_EVENT_DATA_BUFFER};
+			while (xrPollEvent(instance, &ev) == XR_SUCCESS) {
+				ev.type = XR_TYPE_EVENT_DATA_BUFFER;
+			}
+			XrFrameState fs = {.type = XR_TYPE_FRAME_STATE};
+			CK(xrWaitFrame(session, NULL, &fs));
+			CK(xrBeginFrame(session, NULL));
+			if (start == 0) {
+				start = fs.predictedDisplayTime;
+			}
+			double t = (fs.predictedDisplayTime - start) / 1e9;
+			if (t > 5.0) {
+				XrFrameEndInfo fei = {.type = XR_TYPE_FRAME_END_INFO,
+				                      .displayTime = fs.predictedDisplayTime,
+				                      .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
+				CK(xrEndFrame(session, &fei));
+				break;
+			}
+			CK(xrSyncActions(session, &asi_c));
+			XrSpaceLocation loc = {.type = XR_TYPE_SPACE_LOCATION};
+			if (t > 2.0 &&
+			    XR_SUCCEEDED(xrLocateSpace(gaze_space, view_space, fs.predictedDisplayTime, &loc)) &&
+			    (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT)) {
+				double gy, gp;
+				gaze_angles_from_quat(loc.pose.orientation, &gy, &gp);
+				sum_y += gy;
+				sum_p += gp;
+				count++;
+			}
+			solid_swapchain_present(&vk, &bg_sc);
+			solid_swapchain_present(&vk, &dot_sc);
+			XrCompositionLayerQuad bg_quad = {
+			    .type = XR_TYPE_COMPOSITION_LAYER_QUAD,
+			    .space = view_space,
+			    .eyeVisibility = XR_EYE_VISIBILITY_BOTH,
+			    .subImage = {.swapchain = bg_sc.swapchain, .imageRect = {.extent = {64, 64}}},
+			    .pose = {.orientation = {.w = 1}, .position = {0, 0, -2.0f}},
+			    .size = {8.0f, 8.0f},
+			};
+			XrCompositionLayerQuad dot = {
+			    .type = XR_TYPE_COMPOSITION_LAYER_QUAD,
+			    .space = view_space,
+			    .eyeVisibility = XR_EYE_VISIBILITY_BOTH,
+			    .subImage = {.swapchain = dot_sc.swapchain, .imageRect = {.extent = {16, 16}}},
+			    .pose = quad_pose_from_angles(0, 0),
+			    .size = {0.015f, 0.015f},
+			};
+			const XrCompositionLayerBaseHeader *layers[] = {(XrCompositionLayerBaseHeader *)&bg_quad,
+			                                                (XrCompositionLayerBaseHeader *)&dot};
+			XrFrameEndInfo fei = {.type = XR_TYPE_FRAME_END_INFO,
+			                      .displayTime = fs.predictedDisplayTime,
+			                      .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE,
+			                      .layerCount = fs.shouldRender ? 2 : 0,
+			                      .layers = layers};
+			CK(xrEndFrame(session, &fei));
+		}
+		if (count < 30) {
+			fprintf(stderr, "gaze not tracked\n");
+			return 1;
+		}
+		double off_y = sum_y / count, off_p = sum_p / count;
+		printf("centre read yaw %+.2f pitch %+.2f, storing as offset\n", off_y, off_p);
+
+		// Rewrite the calibration file with the offsets, keeping the mapping.
+		const char *home = getenv("HOME");
+		char path[600];
+		snprintf(path, sizeof(path), "%s/.config/monado/bigeye_calibration.json", home);
+		FILE *f = fopen(path, "r");
+		char buf[4096] = {0};
+		if (f != NULL) {
+			size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+			buf[n] = 0;
+			fclose(f);
+		}
+		// Strip any previous offset lines and the closing brace.
+		char *cut = strstr(buf, "\t\"yaw_offset\"");
+		if (cut == NULL) {
+			cut = strrchr(buf, '}');
+		}
+		if (cut != NULL) {
+			*cut = 0;
+		}
+		size_t len = strlen(buf);
+		while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == ',' || buf[len - 1] == ' ')) {
+			buf[--len] = 0;
+		}
+		f = fopen(path, "w");
+		if (f == NULL) {
+			fprintf(stderr, "cannot write %s\n", path);
+			return 1;
+		}
+		if (len > 1) {
+			fprintf(f, "%s,\n", buf);
+		} else {
+			fprintf(f, "{\n");
+		}
+		fprintf(f, "\t\"yaw_offset\": %.3f,\n\t\"pitch_offset\": %.3f\n}\n", off_y, off_p);
+		fclose(f);
+		printf("wrote %s\n", path);
+		xrDestroySession(session);
+		xrDestroyInstance(instance);
+		return 0;
+	}
+
 
 	/*
 	 * Record mode: the dot does slow smooth pursuit over the gaze range while
