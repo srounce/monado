@@ -12,9 +12,13 @@ net per eye is trained from scratch. The export matches the driver's layout:
 input [1, 8, 128, 128], output [1, 6] = pitch, yaw, closedness per eye in
 0..1 with angles as (deg + 45) / 90.
 
-    bigeye_train.py capture.bin labels.txt out.onnx [--epochs N]
+    bigeye_train.py capture.bin labels.txt [out.onnx] [--epochs N]
+
+The output defaults to the path the driver loads without configuration,
+$XDG_CONFIG_HOME/monado/bigeye_model.onnx.
 """
 import argparse
+import os
 import sys
 import time
 
@@ -170,7 +174,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("capture")
     ap.add_argument("labels")
-    ap.add_argument("out")
+    ap.add_argument("out", nargs="?", default=os.path.join(
+        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "monado", "bigeye_model.onnx"))
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--offset-ns", type=int, default=None,
                     help="add to label timestamps before joining (auto if clocks do not overlap)")
@@ -194,6 +199,7 @@ def main():
         evaluate(net, imgs, frames, targets, closed, eye, device)
         nets.append(net.cpu().eval())
 
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     merged = Merged(*nets).eval()
     dummy = torch.zeros(1, 2 * STACK, SIZE, SIZE)
     torch.onnx.export(merged, dummy, args.out, input_names=["input"], output_names=["output"],
