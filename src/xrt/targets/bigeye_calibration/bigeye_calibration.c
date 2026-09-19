@@ -495,9 +495,12 @@ main(void)
 	float fg = grey_env("BIGEYE_CALIB_FG", 0.15f);
 	const float bg_color[4] = {bg, bg, bg, 1.0f};
 	const float fg_color[4] = {fg, fg, fg, 1.0f};
-	struct solid_swapchain bg_sc, fg_sc;
+	// A small red dot in the middle of the square gives a precise fixation point.
+	const float dot_color[4] = {srgb_to_linear(0.85f), srgb_to_linear(0.12f), srgb_to_linear(0.12f), 1.0f};
+	struct solid_swapchain bg_sc, fg_sc, dot_sc;
 	solid_swapchain_init(session, &vk, 64, bg_color, &bg_sc);
 	solid_swapchain_init(session, &vk, 128, fg_color, &fg_sc);
+	solid_swapchain_init(session, &vk, 16, dot_color, &dot_sc);
 
 	/*
 	 * Wait for the session to become ready.
@@ -592,6 +595,7 @@ main(void)
 
 		solid_swapchain_present(&vk, &bg_sc);
 		solid_swapchain_present(&vk, &fg_sc);
+		solid_swapchain_present(&vk, &dot_sc);
 
 		// Background: large quad straight ahead filling the view. Foreground:
 		// small quad at the target direction, composited on top (later layer).
@@ -611,12 +615,16 @@ main(void)
 		    .pose = quad_pose_from_angles(show_yaw, show_pitch),
 		    .size = {0.05f, 0.05f},
 		};
+		XrCompositionLayerQuad dot_quad = fg_quad;
+		dot_quad.subImage = (XrSwapchainSubImage){.swapchain = dot_sc.swapchain, .imageRect = {.extent = {16, 16}}};
+		dot_quad.size = (XrExtent2Df){0.01f, 0.01f};
 		const XrCompositionLayerBaseHeader *layers[] = {(XrCompositionLayerBaseHeader *)&bg_quad,
-		                                                (XrCompositionLayerBaseHeader *)&fg_quad};
+		                                                (XrCompositionLayerBaseHeader *)&fg_quad,
+		                                                (XrCompositionLayerBaseHeader *)&dot_quad};
 		XrFrameEndInfo fei = {.type = XR_TYPE_FRAME_END_INFO,
 		                      .displayTime = fs.predictedDisplayTime,
 		                      .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE,
-		                      .layerCount = fs.shouldRender ? 2 : 0,
+		                      .layerCount = fs.shouldRender ? 3 : 0,
 		                      .layers = layers};
 		CK(xrEndFrame(session, &fei));
 	}
