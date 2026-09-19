@@ -110,8 +110,8 @@ All of these are also adjustable at runtime in the debug GUI.
 
 ## Limitations
 
-The cameras stream, and the illuminators are lit, for as long as the device
-exists; only inference is gated on an application using eye tracking. The
-blink handling is a simple weight threshold on the lid outputs. There is no
+The cameras stream, and the illuminators are lit, only while an application
+has eye tracking in use; the first gaze samples arrive about half a second
+after that. The blink handling is a simple weight threshold on the lid outputs. There is no
 automatic detection of the headset moving on the face; recenter or
 recalibrate when it does.
