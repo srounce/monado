@@ -79,6 +79,9 @@
 DEBUG_GET_ONCE_LOG_OPTION(bigeye_log, "BIGEYE_LOG", U_LOGGING_INFO)
 DEBUG_GET_ONCE_OPTION(bigeye_model, "BIGEYE_EYE_MODEL", NULL)
 DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_scale, "BIGEYE_GAZE_SCALE_DEG", 45.0)
+// The stock model gives little vertical signal on this hardware; bounding the
+// amplified pitch keeps outliers from throwing the gaze far off.
+DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_pitch_limit, "BIGEYE_PITCH_LIMIT_DEG", 10.0)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_size, "BIGEYE_CROP_SIZE", BIGEYE_CROP_SIZE)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_a_x, "BIGEYE_CROP_A_X", BIGEYE_CROP_A_X)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_b_x, "BIGEYE_CROP_B_X", BIGEYE_CROP_B_X)
@@ -136,6 +139,7 @@ struct bigeye_device
 
 	// Runtime adjustable via u_var until proper calibration exists.
 	float gaze_scale_deg;
+	float pitch_limit_deg;
 	float pitch_offset_deg;
 	float yaw_offset_deg;
 	bool flip_pitch;
@@ -159,8 +163,8 @@ struct bigeye_device
 		bool loaded;
 		bool apply;
 		bool poly;
-		// true = c0 + c1*y + c2*p + c3*y^2 + c4*p^2 + c5*y*p, degrees.
-		float yaw_poly[6], pitch_poly[6];
+		// true = c0 + c1*y + c2*p + c3*y*p, degrees.
+		float yaw_poly[4], pitch_poly[4];
 		// Older per-axis format.
 		float yaw_bias, yaw_gain_neg, yaw_gain_pos;
 		float pitch_bias, pitch_gain_neg, pitch_gain_pos;
@@ -290,9 +294,9 @@ bigeye_process_result(struct bigeye_device *d, const float output[BIGEYE_OUTPUT_
 	if (d->calib.loaded && d->calib.apply && d->calib.poly) {
 		const float k = 180.0f / (float)M_PI;
 		float y = yaw * k, p = pitch * k;
-		float t[6] = {1, y, p, y * y, p * p, y * p};
+		float t[4] = {1, y, p, y * p};
 		float ny = 0, np = 0;
-		for (int i = 0; i < 6; i++) {
+		for (int i = 0; i < 4; i++) {
 			ny += d->calib.yaw_poly[i] * t[i];
 			np += d->calib.pitch_poly[i] * t[i];
 		}
@@ -303,6 +307,11 @@ bigeye_process_result(struct bigeye_device *d, const float output[BIGEYE_OUTPUT_
 		yaw -= d->calib.yaw_bias * ((float)M_PI / 180.0f);
 		pitch /= pitch < 0 ? d->calib.pitch_gain_neg : d->calib.pitch_gain_pos;
 		yaw /= yaw < 0 ? d->calib.yaw_gain_neg : d->calib.yaw_gain_pos;
+	}
+
+	float limit = d->pitch_limit_deg * ((float)M_PI / 180.0f);
+	if (limit > 0) {
+		pitch = fminf(fmaxf(pitch, -limit), limit);
 	}
 
 	struct xrt_vec2 filtered;
@@ -341,8 +350,8 @@ bigeye_load_calibration(struct bigeye_device *d)
 
 	bool ok;
 	if (u_json_get(json, "yaw_poly") != NULL) {
-		ok = u_json_get_float_array(u_json_get(json, "yaw_poly"), d->calib.yaw_poly, 6) == 6 &&
-		     u_json_get_float_array(u_json_get(json, "pitch_poly"), d->calib.pitch_poly, 6) == 6;
+		ok = u_json_get_float_array(u_json_get(json, "yaw_poly"), d->calib.yaw_poly, 4) == 4 &&
+		     u_json_get_float_array(u_json_get(json, "pitch_poly"), d->calib.pitch_poly, 4) == 4;
 		cJSON_Delete(json);
 		if (!ok) {
 			BIGEYE_WARN(d, "Invalid polynomial calibration in %s, ignoring", path);
@@ -705,6 +714,7 @@ bigeye_device_create(struct xrt_device *head)
 	d->devh = devh;
 	d->head = head;
 	d->gaze_scale_deg = (float)debug_get_float_option_bigeye_scale();
+	d->pitch_limit_deg = (float)debug_get_float_option_bigeye_pitch_limit();
 	d->crop_size = (int)debug_get_num_option_bigeye_crop_size();
 	d->crop_a_x = (int)debug_get_num_option_bigeye_crop_a_x();
 	d->crop_b_x = (int)debug_get_num_option_bigeye_crop_b_x();
@@ -724,6 +734,7 @@ bigeye_device_create(struct xrt_device *head)
 	u_var_add_root(d, "Bigeye eye tracker", true);
 	u_var_add_log_level(d, &d->log_level, "Log level");
 	u_var_add_f32(d, &d->gaze_scale_deg, "Gaze scale (deg)");
+	u_var_add_f32(d, &d->pitch_limit_deg, "Pitch limit (deg, 0=off)");
 	u_var_add_f32(d, &d->pitch_offset_deg, "Pitch offset (deg)");
 	u_var_add_f32(d, &d->yaw_offset_deg, "Yaw offset (deg)");
 	u_var_add_bool(d, &d->flip_pitch, "Flip pitch");

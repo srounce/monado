@@ -125,11 +125,11 @@ grey_env(const char *name, float def_srgb)
 	return srgb_to_linear(s);
 }
 
-// Maps raw driver output (yaw, pitch) to true gaze angles with a quadratic
-// in both inputs: true = c0 + c1*y + c2*p + c3*y^2 + c4*p^2 + c5*y*p. The
-// cross term is what handles the model's axis coupling; independent per-axis
-// fits cannot.
-#define POLY_TERMS 6
+// Maps raw driver output (yaw, pitch) to true gaze angles with
+// true = c0 + c1*y + c2*p + c3*y*p. The cross term handles the model's axis
+// coupling; squared terms were tried and extrapolate badly once the raw
+// output drifts between sessions.
+#define POLY_TERMS 4
 
 static void
 poly_terms(double y, double p, double t[POLY_TERMS])
@@ -137,9 +137,7 @@ poly_terms(double y, double p, double t[POLY_TERMS])
 	t[0] = 1;
 	t[1] = y;
 	t[2] = p;
-	t[3] = y * y;
-	t[4] = p * p;
-	t[5] = y * p;
+	t[3] = y * p;
 }
 
 static double
