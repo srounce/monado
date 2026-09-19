@@ -1,7 +1,9 @@
 // Copyright 2026, Samuel Rounce
 // SPDX-License-Identifier: BSL-1.0
 //
-// In-headset eye gaze calibration for the Monado bigeye driver.
+// In-headset eye gaze calibration for the Monado bigeye driver. Run with the
+// argument "follow" for a demo where a square the size of the foveated
+// full-resolution region tracks the reported gaze.
 //
 // Shows a white fixation quad (view-locked) at known gaze angles, records the
 // gaze reported through XR_EXT_eye_gaze_interaction, fits
@@ -402,8 +404,9 @@ solid_swapchain_present(struct vk_state *vk, struct solid_swapchain *sc)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
+	bool follow = argc > 1 && strcmp(argv[1], "follow") == 0;
 	setvbuf(stdout, NULL, _IONBF, 0);
 
 	/*
@@ -501,6 +504,9 @@ main(void)
 	solid_swapchain_init(session, &vk, 64, bg_color, &bg_sc);
 	solid_swapchain_init(session, &vk, 128, fg_color, &fg_sc);
 	solid_swapchain_init(session, &vk, 16, dot_color, &dot_sc);
+	const float ref_color[4] = {srgb_to_linear(0.9f), srgb_to_linear(0.9f), srgb_to_linear(0.9f), 1.0f};
+	struct solid_swapchain ref_sc;
+	solid_swapchain_init(session, &vk, 16, ref_color, &ref_sc);
 
 	/*
 	 * Wait for the session to become ready.
@@ -524,7 +530,116 @@ main(void)
 		}
 	}
 
-	printf("Follow the dark square with your eyes, keep your head still.\n");
+	if (!follow) {
+		printf("Follow the dark square with your eyes, keep your head still.\n");
+	}
+
+	/*
+	 * Follow mode: a square the size of the foveated full-resolution region,
+	 * centred on the reported gaze, with a red dot at its centre and fixed
+	 * reference dots at known angles to judge accuracy against.
+	 */
+	if (follow) {
+		const char *fov_env = getenv("BIGEYE_DEMO_FOV_DEG");
+		double fov = fov_env != NULL ? atof(fov_env) : 38.0;
+		const char *secs_env = getenv("BIGEYE_DEMO_SECONDS");
+		double seconds = secs_env != NULL ? atof(secs_env) : 60.0;
+		float region = (float)(2.0 * tan(RAD(fov / 2.0)));
+		static const struct target refs[] = {{0, 0}, {15, 0}, {-15, 0}, {0, 8}, {0, -8}};
+		XrActiveActionSet active_f = {.actionSet = action_set};
+		XrActionsSyncInfo asi_f = {.type = XR_TYPE_ACTIONS_SYNC_INFO,
+		                           .countActiveActionSets = 1,
+		                           .activeActionSets = &active_f};
+		XrTime start = 0;
+		int frame = 0;
+		printf("Follow mode: %.0f deg region, %.0f s. Reference dots at 0, +-15 yaw, +-8 pitch.\n", fov,
+		       seconds);
+
+		while (true) {
+			XrEventDataBuffer ev = {.type = XR_TYPE_EVENT_DATA_BUFFER};
+			while (xrPollEvent(instance, &ev) == XR_SUCCESS) {
+				ev.type = XR_TYPE_EVENT_DATA_BUFFER;
+			}
+			XrFrameState fs = {.type = XR_TYPE_FRAME_STATE};
+			CK(xrWaitFrame(session, NULL, &fs));
+			CK(xrBeginFrame(session, NULL));
+			if (start == 0) {
+				start = fs.predictedDisplayTime;
+			}
+			if ((double)(fs.predictedDisplayTime - start) > seconds * 1e9) {
+				XrFrameEndInfo fei = {.type = XR_TYPE_FRAME_END_INFO,
+				                      .displayTime = fs.predictedDisplayTime,
+				                      .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
+				CK(xrEndFrame(session, &fei));
+				break;
+			}
+
+			CK(xrSyncActions(session, &asi_f));
+			double gy = 0, gp = 0;
+			bool tracked = false;
+			XrSpaceLocation loc = {.type = XR_TYPE_SPACE_LOCATION};
+			if (XR_SUCCEEDED(xrLocateSpace(gaze_space, view_space, fs.predictedDisplayTime, &loc)) &&
+			    (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT)) {
+				gaze_angles_from_quat(loc.pose.orientation, &gy, &gp);
+				tracked = true;
+			}
+			if (frame++ % 45 == 0) {
+				printf("\rgaze yaw %+6.1f pitch %+6.1f %s   ", gy, gp, tracked ? "" : "(not tracked)");
+				fflush(stdout);
+			}
+
+			solid_swapchain_present(&vk, &bg_sc);
+			solid_swapchain_present(&vk, &fg_sc);
+			solid_swapchain_present(&vk, &dot_sc);
+			solid_swapchain_present(&vk, &ref_sc);
+
+			XrCompositionLayerQuad bg_quad = {
+			    .type = XR_TYPE_COMPOSITION_LAYER_QUAD,
+			    .space = view_space,
+			    .eyeVisibility = XR_EYE_VISIBILITY_BOTH,
+			    .subImage = {.swapchain = bg_sc.swapchain, .imageRect = {.extent = {64, 64}}},
+			    .pose = {.orientation = {.w = 1}, .position = {0, 0, -2.0f}},
+			    .size = {8.0f, 8.0f},
+			};
+			XrCompositionLayerQuad region_quad = {
+			    .type = XR_TYPE_COMPOSITION_LAYER_QUAD,
+			    .space = view_space,
+			    .eyeVisibility = XR_EYE_VISIBILITY_BOTH,
+			    .subImage = {.swapchain = fg_sc.swapchain, .imageRect = {.extent = {128, 128}}},
+			    .pose = quad_pose_from_angles(gy, gp),
+			    .size = {region, region},
+			};
+			XrCompositionLayerQuad gaze_dot = region_quad;
+			gaze_dot.subImage = (XrSwapchainSubImage){.swapchain = dot_sc.swapchain, .imageRect = {.extent = {16, 16}}};
+			gaze_dot.size = (XrExtent2Df){0.015f, 0.015f};
+			XrCompositionLayerQuad ref_quads[5];
+			for (int i = 0; i < 5; i++) {
+				ref_quads[i] = gaze_dot;
+				ref_quads[i].subImage.swapchain = ref_sc.swapchain;
+				ref_quads[i].pose = quad_pose_from_angles(refs[i].yaw_deg, refs[i].pitch_deg);
+				// Slightly closer than 1 m so they draw over the region square.
+				ref_quads[i].pose.position.x *= 0.99f;
+				ref_quads[i].pose.position.y *= 0.99f;
+				ref_quads[i].pose.position.z *= 0.99f;
+			}
+			const XrCompositionLayerBaseHeader *layers[8] = {
+			    (XrCompositionLayerBaseHeader *)&bg_quad,     (XrCompositionLayerBaseHeader *)&region_quad,
+			    (XrCompositionLayerBaseHeader *)&ref_quads[0], (XrCompositionLayerBaseHeader *)&ref_quads[1],
+			    (XrCompositionLayerBaseHeader *)&ref_quads[2], (XrCompositionLayerBaseHeader *)&ref_quads[3],
+			    (XrCompositionLayerBaseHeader *)&ref_quads[4], (XrCompositionLayerBaseHeader *)&gaze_dot,
+			};
+			XrFrameEndInfo fei = {.type = XR_TYPE_FRAME_END_INFO,
+			                      .displayTime = fs.predictedDisplayTime,
+			                      .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE,
+			                      .layerCount = fs.shouldRender ? 8 : 0,
+			                      .layers = layers};
+			CK(xrEndFrame(session, &fei));
+		}
+		printf("\n");
+		xrDestroySession(session);
+		xrDestroyInstance(instance);
+		return 0;
+	}
 
 	/*
 	 * Frame loop.
