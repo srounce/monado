@@ -349,6 +349,7 @@ option_with_deps(XRT_BUILD_DRIVER_UVC "Enable userspace UVC driver" DEPENDS XRT_
 # Drivers to build (sorted)
 option_with_deps(XRT_BUILD_DRIVER_ANDROID "Enable Android sensors driver" DEPENDS ANDROID)
 option_with_deps(XRT_BUILD_DRIVER_ARDUINO "Enable Arduino input device with BLE" DEPENDS XRT_HAVE_DBUS)
+option_with_deps(XRT_BUILD_DRIVER_BIGEYE "Enable Bigscreen Beyond 2e eye tracking driver" DEPENDS XRT_BUILD_DRIVER_UVC XRT_HAVE_ONNXRUNTIME XRT_HAVE_JPEG)
 option_with_deps(XRT_BUILD_DRIVER_BLUBUR_S1 "Enable 3Glasses Blubur S1 device driver" DEPENDS XRT_HAVE_INTERNAL_HID)
 option_with_deps(XRT_BUILD_DRIVER_CONTACTGLOVE "Enable Melt Interface Technologies ContactGlove (CG2) device driver" DEPENDS XRT_HAVE_LINUX) # only Linux has serial right now
 option_with_deps(XRT_BUILD_DRIVER_DAYDREAM "Enable the Google Daydream View controller driver (BLE)" DEPENDS XRT_HAVE_DBUS)
@@ -470,6 +471,7 @@ list(
 	AVAILABLE_DRIVERS
 	"ANDROID"
 	"ARDUINO"
+	"BIGEYE"
 	"BLUBUR_S1"
 	"CONTACTGLOVE"
 	"DAYDREAM"
@@ -727,6 +729,7 @@ if(XRT_MODULE_OPENXR_STATE_TRACKER)
 endif()
 message(STATUS "#    DRIVER_ANDROID:              ${XRT_BUILD_DRIVER_ANDROID}")
 message(STATUS "#    DRIVER_ARDUINO:              ${XRT_BUILD_DRIVER_ARDUINO}")
+message(STATUS "#    DRIVER_BIGEYE:               ${XRT_BUILD_DRIVER_BIGEYE}")
 message(STATUS "#    DRIVER_BLUBUR_S1:            ${XRT_BUILD_DRIVER_BLUBUR_S1}")
 message(STATUS "#    DRIVER_CONTACTGLOVE:         ${XRT_BUILD_DRIVER_CONTACTGLOVE}")
 message(STATUS "#    DRIVER_DAYDREAM:             ${XRT_BUILD_DRIVER_DAYDREAM}")

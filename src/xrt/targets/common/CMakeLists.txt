@@ -158,6 +158,10 @@ if(XRT_BUILD_DRIVER_PSSENSE)
 	target_link_libraries(target_lists PRIVATE drv_pssense)
 endif()
 
+if(XRT_BUILD_DRIVER_BIGEYE)
+	target_link_libraries(target_lists PRIVATE drv_bigeye)
+endif()
+
 if(XRT_BUILD_DRIVER_PSVR)
 	target_link_libraries(target_lists PRIVATE drv_psvr)
 endif()

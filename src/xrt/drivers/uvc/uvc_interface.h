@@ -54,6 +54,16 @@ struct uvc_probe_commit_control
 };
 static_assert(sizeof(struct uvc_probe_commit_control) == 0x1F, "bad struct size");
 
+//! UVC 1.1 probe/commit control, 34 bytes on the wire.
+struct uvc_probe_commit_control_1_1
+{
+	struct uvc_probe_commit_control base;
+	uint8_t bPreferedVersion;
+	uint8_t bMinVersion;
+	uint8_t bMaxVersion;
+};
+static_assert(sizeof(struct uvc_probe_commit_control_1_1) == 0x22, "bad struct size");
+
 #pragma pack(pop)
 
 //! Called to get the timestamp of a specific frame, if a callee has a more precise way of timestamping frames.
@@ -70,6 +80,12 @@ struct uvc_stream_parameters
 	uint32_t width;
 	uint32_t height;
 	size_t stride;
+	//! Video streaming endpoint, defaults to 0x81 if left unset by the setup callback.
+	uint8_t endpoint_address;
+	//! Probe/commit control transfer length; defaults to the UVC 1.0 sized
+	//! @ref uvc_probe_commit_control, UVC 1.1 devices need the 34 byte
+	//! @ref uvc_probe_commit_control_1_1 size.
+	uint16_t probe_commit_size;
 };
 
 struct uvc_fs;

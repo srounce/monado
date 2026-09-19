@@ -588,14 +588,20 @@ uvc_fs_create(libusb_context *usb_ctx,
 
 	bool is_usb2 = (desc->bcdUSB < 0x300);
 
-	struct uvc_probe_commit_control control = {
-	    .bFormatIndex = 1,
-	    .bFrameIndex = 1,
+	struct uvc_probe_commit_control_1_1 control = {
+	    .base =
+	        {
+	            .bFormatIndex = 1,
+	            .bFrameIndex = 1,
+	        },
 	};
+
+	stream->parameters.endpoint_address = 0x81;
+	stream->parameters.probe_commit_size = sizeof(struct uvc_probe_commit_control);
 
 	size_t packet_size;
 	int alt_setting;
-	if (!setup_stream_parameters_callback(desc->idVendor, desc->idProduct, is_usb2, devh, &control,
+	if (!setup_stream_parameters_callback(desc->idVendor, desc->idProduct, is_usb2, devh, &control.base,
 	                                      &stream->parameters, &packet_size, &alt_setting, user_data)) {
 		UVC_ERROR(stream, "Unknown / unhandled USB device VID/PID 0x%04x / 0x%04x", desc->idVendor,
 		          desc->idProduct);
@@ -603,19 +609,22 @@ uvc_fs_create(libusb_context *usb_ctx,
 		goto error;
 	}
 
-	ret = uvc_set_cur(devh, 1, 0, VS_PROBE_CONTROL, &control, sizeof control);
+	uint16_t probe_size = stream->parameters.probe_commit_size;
+	assert(probe_size <= sizeof(control));
+
+	ret = uvc_set_cur(devh, 1, 0, VS_PROBE_CONTROL, &control, probe_size);
 	if (ret < 0) {
 		UVC_ERROR(stream, "Failed to set PROBE");
 		goto error;
 	}
 
-	ret = uvc_get_cur(devh, 1, 0, VS_PROBE_CONTROL, &control, sizeof control);
+	ret = uvc_get_cur(devh, 1, 0, VS_PROBE_CONTROL, &control, probe_size);
 	if (ret < 0) {
 		UVC_ERROR(stream, "failed to get PROBE");
 		goto error;
 	}
 
-	ret = uvc_set_cur(devh, 1, 0, VS_COMMIT_CONTROL, &control, sizeof control);
+	ret = uvc_set_cur(devh, 1, 0, VS_COMMIT_CONTROL, &control, probe_size);
 	if (ret < 0) {
 		UVC_ERROR(stream, "failed to set COMMIT");
 		goto error;
@@ -648,7 +657,7 @@ uvc_fs_create(libusb_context *usb_ctx,
 			goto error;
 		}
 
-		uint8_t bEndpointAddress = 0x81;
+		uint8_t bEndpointAddress = stream->parameters.endpoint_address;
 		int transfer_size = num_packets * packet_size;
 		void *buf = malloc(transfer_size);
 		stream->transfer[i]->flags |= LIBUSB_TRANSFER_FREE_BUFFER;
