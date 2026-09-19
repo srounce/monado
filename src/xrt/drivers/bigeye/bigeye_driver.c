@@ -54,6 +54,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 
 #define BIGEYE_VID 0x35bd
@@ -770,9 +771,16 @@ bigeye_device_create(struct xrt_device *head)
 {
 	enum u_logging_level log_level = debug_get_log_option_bigeye_log();
 
+	// BIGEYE_EYE_MODEL, else the model bigeye_train.py writes by default.
+	char default_model[1024];
 	const char *model_path = debug_get_option_bigeye_model();
-	if (model_path == NULL) {
-		U_LOG_IFL_I(log_level, "BIGEYE_EYE_MODEL not set, not creating Bigeye eye tracking device");
+	if (model_path == NULL &&
+	    u_file_get_path_in_config_dir("bigeye_model.onnx", default_model, sizeof(default_model)) >= 0) {
+		model_path = default_model;
+	}
+	if (model_path == NULL || access(model_path, R_OK) != 0) {
+		U_LOG_IFL_I(log_level, "No gaze model at %s, not creating Bigeye eye tracking device",
+		            model_path != NULL ? model_path : "(BIGEYE_EYE_MODEL unset)");
 		return NULL;
 	}
 

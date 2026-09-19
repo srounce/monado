@@ -45,8 +45,9 @@ mirrored and the eyes swapped relative to the raw frame by default
 (`BIGEYE_FLIP_A`, `BIGEYE_FLIP_B`, `BIGEYE_SWAP_EYES`); this matched the
 orientation the reference models expect.
 
-The model file comes from `BIGEYE_EYE_MODEL`; without it the device is not
-created. Nothing is bundled. Third-party models such as Project Babble's carry
+The model is loaded from `BIGEYE_EYE_MODEL`, or by default from
+`~/.config/monado/bigeye_model.onnx` (honouring `XDG_CONFIG_HOME`); without a
+model the device is not created. Nothing is bundled. Third-party models such as Project Babble's carry
 a non-commercial copyleft license and cannot be shipped with Monado, and on
 this hardware their stock model gave usable yaw but almost no vertical
 signal. The intended path is a model trained on your own eyes, below.
@@ -64,12 +65,13 @@ frame pair with its `CLOCK_MONOTONIC` timestamp to the capture file while
 gaze is in use; the tool logs the target angles with the same clock via
 `XR_KHR_convert_timespec_time`. Then
 
-    bigeye_train.py /path/capture.bin /path/labels.txt ~/.local/share/monado/user_model.onnx
+    bigeye_train.py /path/capture.bin /path/labels.txt
 
 trains one small convolutional net per eye from scratch (PyTorch, about a
 minute on a GPU, needs `numpy torch onnx onnxscript`) and exports a single
-ONNX file in the driver's layout. Point `BIGEYE_EYE_MODEL` at it. Training
-errors around 1 degree on both axes are typical.
+ONNX file in the driver's layout at the default model path, so the driver
+picks it up on the next start with no configuration. Training errors around
+1 degree on both axes are typical.
 
 ## Calibration and recentering
 
@@ -96,7 +98,7 @@ calibration and a recenter, the 14 targets validate within about 2 degrees.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BIGEYE_EYE_MODEL` | unset | ONNX model path, required |
+| `BIGEYE_EYE_MODEL` | `~/.config/monado/bigeye_model.onnx` | ONNX model path |
 | `BIGEYE_LOG` | info | log level |
 | `BIGEYE_CROP_SIZE`, `BIGEYE_CROP_A_X`, `BIGEYE_CROP_B_X`, `BIGEYE_CROP_Y` | 350, 0, 50, 0 | per-eye crop, offsets into each 400 px half |
 | `BIGEYE_FLIP_A`, `BIGEYE_FLIP_B`, `BIGEYE_SWAP_EYES` | true | image orientation fed to the model |
