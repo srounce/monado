@@ -552,6 +552,8 @@ main(int argc, char **argv)
 		                           .activeActionSets = &active_f};
 		XrTime start = 0;
 		int frame = 0;
+		const char *log_path = getenv("BIGEYE_DEMO_LOG");
+		FILE *log = log_path != NULL ? fopen(log_path, "w") : NULL;
 		printf("Follow mode: %.0f deg region, %.0f s. Reference dots at 0, +-15 yaw, +-8 pitch.\n", fov,
 		       seconds);
 
@@ -582,6 +584,9 @@ main(int argc, char **argv)
 			    (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT)) {
 				gaze_angles_from_quat(loc.pose.orientation, &gy, &gp);
 				tracked = true;
+			}
+			if (log != NULL) {
+				fprintf(log, "%.3f %.2f %.2f %d\n", (fs.predictedDisplayTime - start) / 1e9, gy, gp, tracked);
 			}
 			if (frame++ % 45 == 0) {
 				printf("\rgaze yaw %+6.1f pitch %+6.1f %s   ", gy, gp, tracked ? "" : "(not tracked)");
@@ -636,6 +641,9 @@ main(int argc, char **argv)
 			CK(xrEndFrame(session, &fei));
 		}
 		printf("\n");
+		if (log != NULL) {
+			fclose(log);
+		}
 		xrDestroySession(session);
 		xrDestroyInstance(instance);
 		return 0;
