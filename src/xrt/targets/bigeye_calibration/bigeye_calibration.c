@@ -1,18 +1,19 @@
 // Copyright 2026, Samuel Rounce
 // SPDX-License-Identifier: BSL-1.0
 //
-// In-headset eye gaze calibration for the Monado bigeye driver. Run with the
-// argument "follow" for a demo where a square the size of the foveated
-// full-resolution region tracks the reported gaze.
+// In-headset tools for the Monado bigeye driver, see doc/bigeye-eye-tracking.md.
 //
-// Shows a white fixation quad (view-locked) at known gaze angles, records the
-// gaze reported through XR_EXT_eye_gaze_interaction, fits
-// reported = gain * true + bias per axis and writes the result to
-// ~/.config/monado/bigeye_calibration.json for the driver to invert.
+//   bigeye_calibration            14 fixation targets; fits a bilinear map from
+//                                 reported to true gaze and writes it to
+//                                 ~/.config/monado/bigeye_calibration.json
+//   bigeye_calibration recenter   5 s on the centre dot; stores the offset
+//   bigeye_calibration record F   smooth pursuit labels for bigeye_train.py
+//   bigeye_calibration follow     a square the size of the foveated region
+//                                 tracks the reported gaze
 //
-// Rendering uses XR_KHR_vulkan_enable2. Each fixation target is a small quad
-// composition layer whose swapchain image is simply cleared to white by a
-// render pass, so there is no pipeline, vertex data or shader.
+// Rendering uses XR_KHR_vulkan_enable2. Every element is a quad composition
+// layer whose swapchain image is cleared to one colour by a render pass, so
+// there is no pipeline, vertex data or shader.
 
 #include <math.h>
 #include <stdbool.h>
@@ -58,8 +59,8 @@ struct target
 
 // Cross + corners, ending back at center.
 static const struct target targets[] = {
-    {0, 0},  {15, 0},  {-15, 0}, {25, 0},   {-25, 0}, {0, 8},    {0, -8},
-    {0, 14}, {0, -14}, {15, 8},  {-15, 8},  {15, -8}, {-15, -8}, {0, 0},
+    {0, 0},  {15, 0},  {-15, 0}, {25, 0},  {-25, 0}, {0, 8},    {0, -8},
+    {0, 14}, {0, -14}, {15, 8},  {-15, 8}, {15, -8}, {-15, -8}, {0, 0},
 };
 #define NUM_TARGETS (sizeof(targets) / sizeof(targets[0]))
 #define MOVE_NS 700000000L  // 0.7 s glide to the next target, not sampled
@@ -246,9 +247,8 @@ vk_init(XrInstance xr_instance, XrSystemId system_id, struct vk_state *vk)
 	CK(create_instance(xr_instance, &xr_ici, &vk->instance, &vk_res));
 	VK(vk_res);
 
-	XrVulkanGraphicsDeviceGetInfoKHR gdi = {.type = XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR,
-	                                        .systemId = system_id,
-	                                        .vulkanInstance = vk->instance};
+	XrVulkanGraphicsDeviceGetInfoKHR gdi = {
+	    .type = XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR, .systemId = system_id, .vulkanInstance = vk->instance};
 	CK(get_phys(xr_instance, &gdi, &vk->phys));
 
 	// Pick a graphics queue family.
@@ -270,9 +270,8 @@ vk_init(XrInstance xr_instance, XrSystemId system_id, struct vk_state *vk)
 	                               .queueFamilyIndex = vk->queue_family,
 	                               .queueCount = 1,
 	                               .pQueuePriorities = &prio};
-	VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-	                          .queueCreateInfoCount = 1,
-	                          .pQueueCreateInfos = &qci};
+	VkDeviceCreateInfo dci = {
+	    .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci};
 	XrVulkanDeviceCreateInfoKHR xr_dci = {.type = XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR,
 	                                      .systemId = system_id,
 	                                      .pfnGetInstanceProcAddr = vkGetInstanceProcAddr,
@@ -299,9 +298,8 @@ vk_init(XrInstance xr_instance, XrSystemId system_id, struct vk_state *vk)
 	                               .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
 	                               .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
 	VkAttachmentReference ref = {.attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-	VkSubpassDescription sub = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-	                            .colorAttachmentCount = 1,
-	                            .pColorAttachments = &ref};
+	VkSubpassDescription sub = {
+	    .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = 1, .pColorAttachments = &ref};
 	VkRenderPassCreateInfo rpci = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
 	                               .attachmentCount = 1,
 	                               .pAttachments = &att,
@@ -320,8 +318,8 @@ struct solid_swapchain
 };
 
 static void
-solid_swapchain_init(XrSession session, struct vk_state *vk, uint32_t size, const float color[4],
-                     struct solid_swapchain *out)
+solid_swapchain_init(
+    XrSession session, struct vk_state *vk, uint32_t size, const float color[4], struct solid_swapchain *out)
 {
 	XrSwapchainCreateInfo scci = {.type = XR_TYPE_SWAPCHAIN_CREATE_INFO,
 	                              .usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT,
@@ -344,13 +342,12 @@ solid_swapchain_init(XrSession session, struct vk_state *vk, uint32_t size, cons
 
 	out->cmds = calloc(out->img_count, sizeof(*out->cmds));
 	for (uint32_t i = 0; i < out->img_count; i++) {
-		VkImageViewCreateInfo vci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-		                             .image = images[i].image,
-		                             .viewType = VK_IMAGE_VIEW_TYPE_2D,
-		                             .format = vk->format,
-		                             .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-		                                                  .levelCount = 1,
-		                                                  .layerCount = 1}};
+		VkImageViewCreateInfo vci = {
+		    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		    .image = images[i].image,
+		    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+		    .format = vk->format,
+		    .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1}};
 		VkImageView view;
 		VK(vkCreateImageView(vk->device, &vci, NULL, &view));
 
@@ -395,9 +392,8 @@ solid_swapchain_present(struct vk_state *vk, struct solid_swapchain *sc)
 	XrSwapchainImageWaitInfo wi = {.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, .timeout = XR_INFINITE_DURATION};
 	CK(xrWaitSwapchainImage(sc->swapchain, &wi));
 
-	VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-	                       .commandBufferCount = 1,
-	                       .pCommandBuffers = &sc->cmds[idx]};
+	VkSubmitInfo submit = {
+	    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &sc->cmds[idx]};
 	VK(vkQueueSubmit(vk->queue, 1, &submit, VK_NULL_HANDLE));
 	VK(vkQueueWaitIdle(vk->queue));
 
@@ -418,11 +414,11 @@ main(int argc, char **argv)
 	 */
 	const char *exts[] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, "XR_EXT_eye_gaze_interaction",
 	                      XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME};
-	XrInstanceCreateInfo ici = {.type = XR_TYPE_INSTANCE_CREATE_INFO,
-	                            .applicationInfo = {.applicationName = "bigeye_calib",
-	                                                .apiVersion = XR_API_VERSION_1_0},
-	                            .enabledExtensionCount = 3,
-	                            .enabledExtensionNames = exts};
+	XrInstanceCreateInfo ici = {
+	    .type = XR_TYPE_INSTANCE_CREATE_INFO,
+	    .applicationInfo = {.applicationName = "bigeye_calib", .apiVersion = XR_API_VERSION_1_0},
+	    .enabledExtensionCount = 3,
+	    .enabledExtensionNames = exts};
 	XrInstance instance;
 	CK(xrCreateInstance(&ici, &instance));
 
@@ -435,8 +431,8 @@ main(int argc, char **argv)
 	XrSystemId system_id;
 	CK(xrGetSystem(instance, &sgi, &system_id));
 
-	XrSystemEyeGazeInteractionPropertiesEXT gaze_props = {
-	    .type = XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT};
+	XrSystemEyeGazeInteractionPropertiesEXT gaze_props = {.type =
+	                                                          XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT};
 	XrSystemProperties props = {.type = XR_TYPE_SYSTEM_PROPERTIES, .next = &gaze_props};
 	CK(xrGetSystemProperties(instance, system_id, &props));
 	if (!gaze_props.supportsEyeGazeInteraction) {
@@ -482,9 +478,8 @@ main(int argc, char **argv)
 	                                             .suggestedBindings = &binding};
 	CK(xrSuggestInteractionProfileBindings(instance, &ipsb));
 
-	XrSessionActionSetsAttachInfo sasai = {.type = XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO,
-	                                       .countActionSets = 1,
-	                                       .actionSets = &action_set};
+	XrSessionActionSetsAttachInfo sasai = {
+	    .type = XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO, .countActionSets = 1, .actionSets = &action_set};
 	CK(xrAttachSessionActionSets(session, &sasai));
 
 	XrActionSpaceCreateInfo aspci = {.type = XR_TYPE_ACTION_SPACE_CREATE_INFO,
@@ -528,10 +523,9 @@ main(int argc, char **argv)
 			if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
 				XrEventDataSessionStateChanged *ssc = (XrEventDataSessionStateChanged *)&ev;
 				if (ssc->state == XR_SESSION_STATE_READY) {
-					XrSessionBeginInfo sbi = {
-					    .type = XR_TYPE_SESSION_BEGIN_INFO,
-					    .primaryViewConfigurationType =
-					        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+					XrSessionBeginInfo sbi = {.type = XR_TYPE_SESSION_BEGIN_INFO,
+					                          .primaryViewConfigurationType =
+					                              XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
 					CK(xrBeginSession(session, &sbi));
 					running = true;
 				}
@@ -560,9 +554,8 @@ main(int argc, char **argv)
 	 */
 	if (recenter) {
 		XrActiveActionSet active_c = {.actionSet = action_set};
-		XrActionsSyncInfo asi_c = {.type = XR_TYPE_ACTIONS_SYNC_INFO,
-		                           .countActiveActionSets = 1,
-		                           .activeActionSets = &active_c};
+		XrActionsSyncInfo asi_c = {
+		    .type = XR_TYPE_ACTIONS_SYNC_INFO, .countActiveActionSets = 1, .activeActionSets = &active_c};
 		XrTime start = 0;
 		double sum_y = 0, sum_p = 0;
 		int count = 0;
@@ -703,9 +696,8 @@ main(int argc, char **argv)
 			return 1;
 		}
 		XrActiveActionSet active_r = {.actionSet = action_set};
-		XrActionsSyncInfo asi_r = {.type = XR_TYPE_ACTIONS_SYNC_INFO,
-		                           .countActiveActionSets = 1,
-		                           .activeActionSets = &active_r};
+		XrActionsSyncInfo asi_r = {
+		    .type = XR_TYPE_ACTIONS_SYNC_INFO, .countActiveActionSets = 1, .activeActionSets = &active_r};
 		XrTime start = 0;
 		printf("Record mode: %.0f s pursuit then %.0f s eyes closed.\n", pursuit_s, blink_s);
 		printf("Follow the red dot smoothly. When it disappears, close your eyes until the run ends.\n");
@@ -800,9 +792,8 @@ main(int argc, char **argv)
 		float region = (float)(2.0 * tan(RAD(fov / 2.0)));
 		static const struct target refs[] = {{0, 0}, {15, 0}, {-15, 0}, {0, 8}, {0, -8}};
 		XrActiveActionSet active_f = {.actionSet = action_set};
-		XrActionsSyncInfo asi_f = {.type = XR_TYPE_ACTIONS_SYNC_INFO,
-		                           .countActiveActionSets = 1,
-		                           .activeActionSets = &active_f};
+		XrActionsSyncInfo asi_f = {
+		    .type = XR_TYPE_ACTIONS_SYNC_INFO, .countActiveActionSets = 1, .activeActionSets = &active_f};
 		XrTime start = 0;
 		int frame = 0;
 		const char *log_path = getenv("BIGEYE_DEMO_LOG");
@@ -839,7 +830,8 @@ main(int argc, char **argv)
 				tracked = true;
 			}
 			if (log != NULL) {
-				fprintf(log, "%.3f %.2f %.2f %d\n", (fs.predictedDisplayTime - start) / 1e9, gy, gp, tracked);
+				fprintf(log, "%.3f %.2f %.2f %d\n", (fs.predictedDisplayTime - start) / 1e9, gy, gp,
+				        tracked);
 			}
 			if (frame++ % 45 == 0) {
 				printf("\rgaze yaw %+6.1f pitch %+6.1f %s   ", gy, gp, tracked ? "" : "(not tracked)");
@@ -868,7 +860,8 @@ main(int argc, char **argv)
 			    .size = {region, region},
 			};
 			XrCompositionLayerQuad gaze_dot = region_quad;
-			gaze_dot.subImage = (XrSwapchainSubImage){.swapchain = dot_sc.swapchain, .imageRect = {.extent = {16, 16}}};
+			gaze_dot.subImage =
+			    (XrSwapchainSubImage){.swapchain = dot_sc.swapchain, .imageRect = {.extent = {16, 16}}};
 			gaze_dot.size = (XrExtent2Df){0.015f, 0.015f};
 			XrCompositionLayerQuad ref_quads[5];
 			for (int i = 0; i < 5; i++) {
@@ -881,10 +874,14 @@ main(int argc, char **argv)
 				ref_quads[i].pose.position.z *= 0.99f;
 			}
 			const XrCompositionLayerBaseHeader *layers[8] = {
-			    (XrCompositionLayerBaseHeader *)&bg_quad,     (XrCompositionLayerBaseHeader *)&region_quad,
-			    (XrCompositionLayerBaseHeader *)&ref_quads[0], (XrCompositionLayerBaseHeader *)&ref_quads[1],
-			    (XrCompositionLayerBaseHeader *)&ref_quads[2], (XrCompositionLayerBaseHeader *)&ref_quads[3],
-			    (XrCompositionLayerBaseHeader *)&ref_quads[4], (XrCompositionLayerBaseHeader *)&gaze_dot,
+			    (XrCompositionLayerBaseHeader *)&bg_quad,
+			    (XrCompositionLayerBaseHeader *)&region_quad,
+			    (XrCompositionLayerBaseHeader *)&ref_quads[0],
+			    (XrCompositionLayerBaseHeader *)&ref_quads[1],
+			    (XrCompositionLayerBaseHeader *)&ref_quads[2],
+			    (XrCompositionLayerBaseHeader *)&ref_quads[3],
+			    (XrCompositionLayerBaseHeader *)&ref_quads[4],
+			    (XrCompositionLayerBaseHeader *)&gaze_dot,
 			};
 			XrFrameEndInfo fei = {.type = XR_TYPE_FRAME_END_INFO,
 			                      .displayTime = fs.predictedDisplayTime,
@@ -909,9 +906,8 @@ main(int argc, char **argv)
 	size_t phase = 0;
 
 	XrActiveActionSet active = {.actionSet = action_set};
-	XrActionsSyncInfo asi = {.type = XR_TYPE_ACTIONS_SYNC_INFO,
-	                         .countActiveActionSets = 1,
-	                         .activeActionSets = &active};
+	XrActionsSyncInfo asi = {
+	    .type = XR_TYPE_ACTIONS_SYNC_INFO, .countActiveActionSets = 1, .activeActionSets = &active};
 
 	while (phase < NUM_TARGETS) {
 		XrEventDataBuffer ev = {.type = XR_TYPE_EVENT_DATA_BUFFER};
@@ -992,7 +988,8 @@ main(int argc, char **argv)
 		    .size = {0.05f, 0.05f},
 		};
 		XrCompositionLayerQuad dot_quad = fg_quad;
-		dot_quad.subImage = (XrSwapchainSubImage){.swapchain = dot_sc.swapchain, .imageRect = {.extent = {16, 16}}};
+		dot_quad.subImage =
+		    (XrSwapchainSubImage){.swapchain = dot_sc.swapchain, .imageRect = {.extent = {16, 16}}};
 		dot_quad.size = (XrExtent2Df){0.01f, 0.01f};
 		const XrCompositionLayerBaseHeader *layers[] = {(XrCompositionLayerBaseHeader *)&bg_quad,
 		                                                (XrCompositionLayerBaseHeader *)&fg_quad,
@@ -1011,7 +1008,8 @@ main(int argc, char **argv)
 	double tx_yaw[NUM_TARGETS], m_yaw[NUM_TARGETS];
 	double tx_pitch[NUM_TARGETS], m_pitch[NUM_TARGETS];
 	int n = 0;
-	printf("\n%8s %8s | %8s %8s | %6s %6s | samples\n", "tgt yaw", "tgt pit", "meas yaw", "meas pit", "sd yaw", "sd pit");
+	printf("\n%8s %8s | %8s %8s | %6s %6s | samples\n", "tgt yaw", "tgt pit", "meas yaw", "meas pit", "sd yaw",
+	       "sd pit");
 	for (size_t i = 0; i < NUM_TARGETS; i++) {
 		if (stats[i].count < 10) {
 			printf("%8.1f %8.1f | %17s | %d (skipped)\n", (double)targets[i].yaw_deg,
@@ -1024,8 +1022,8 @@ main(int argc, char **argv)
 		m_pitch[n] = stats[i].sum_pitch / stats[i].count;
 		double sd_y = sqrt(fmax(stats[i].sq_yaw / stats[i].count - m_yaw[n] * m_yaw[n], 0.0));
 		double sd_p = sqrt(fmax(stats[i].sq_pitch / stats[i].count - m_pitch[n] * m_pitch[n], 0.0));
-		printf("%8.1f %8.1f | %8.2f %8.2f | %6.2f %6.2f | %d\n", tx_yaw[n], tx_pitch[n], m_yaw[n], m_pitch[n], sd_y,
-		       sd_p, stats[i].count);
+		printf("%8.1f %8.1f | %8.2f %8.2f | %6.2f %6.2f | %d\n", tx_yaw[n], tx_pitch[n], m_yaw[n], m_pitch[n],
+		       sd_y, sd_p, stats[i].count);
 		n++;
 	}
 
