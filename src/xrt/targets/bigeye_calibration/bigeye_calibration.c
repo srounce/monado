@@ -541,6 +541,15 @@ main(int argc, char **argv)
 	}
 
 	if (!follow && !record && !recenter) {
+		// Measure the raw mapping: move any current calibration aside and let
+		// the driver's hot reload drop it before the first target.
+		const char *home_dir = getenv("HOME");
+		char cur[600], bak[608];
+		snprintf(cur, sizeof(cur), "%s/.config/monado/bigeye_calibration.json", home_dir);
+		snprintf(bak, sizeof(bak), "%s.bak", cur);
+		if (rename(cur, bak) == 0) {
+			printf("Previous calibration kept at %s\n", bak);
+		}
 		printf("Follow the dark square with your eyes, keep your head still.\n");
 	}
 
@@ -633,6 +642,20 @@ main(int argc, char **argv)
 			buf[n] = 0;
 			fclose(f);
 		}
+		// The residual was measured with the stored offsets applied, so add.
+		double prev_y = 0, prev_p = 0;
+		char *py = strstr(buf, "\"yaw_offset\":");
+		char *pp = strstr(buf, "\"pitch_offset\":");
+		if (py != NULL) {
+			prev_y = atof(py + strlen("\"yaw_offset\":"));
+		}
+		if (pp != NULL) {
+			prev_p = atof(pp + strlen("\"pitch_offset\":"));
+		}
+		off_y += prev_y;
+		off_p += prev_p;
+		printf("total offset yaw %+.2f pitch %+.2f\n", off_y, off_p);
+
 		// Strip any previous offset lines and the closing brace.
 		char *cut = strstr(buf, "\t\"yaw_offset\"");
 		if (cut == NULL) {
@@ -1023,6 +1046,23 @@ main(int argc, char **argv)
 	}
 	printf("max residual %.2f deg\n", max_err);
 
+	// Zero the centre exactly: the least squares fit spreads error over all
+	// targets, and the centre is where an offset is most noticeable.
+	double off_y = 0, off_p = 0;
+	int n_center = 0;
+	for (int i = 0; i < n; i++) {
+		if (tx_yaw[i] == 0 && tx_pitch[i] == 0) {
+			off_y += poly_eval(cy, m_yaw[i], m_pitch[i]);
+			off_p += poly_eval(cp, m_yaw[i], m_pitch[i]);
+			n_center++;
+		}
+	}
+	if (n_center > 0) {
+		off_y /= n_center;
+		off_p /= n_center;
+	}
+	printf("centre offset yaw %+.2f pitch %+.2f\n", off_y, off_p);
+
 	if (getenv("BIGEYE_CALIB_DRY_RUN") != NULL) {
 		printf("dry run, not writing calibration\n");
 		xrDestroySession(session);
@@ -1048,7 +1088,7 @@ main(int argc, char **argv)
 	for (int i = 0; i < POLY_TERMS; i++) {
 		fprintf(f, "%s%.6g", i ? ", " : "", cp[i]);
 	}
-	fprintf(f, "]\n}\n");
+	fprintf(f, "],\n\t\"yaw_offset\": %.3f,\n\t\"pitch_offset\": %.3f\n}\n", off_y, off_p);
 	fclose(f);
 	printf("wrote %s\n", path);
 
