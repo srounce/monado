@@ -37,12 +37,12 @@ bigeye_inference_create(const char *model_path, enum u_logging_level log_level)
 		inf->wrap = std::make_unique<OnnxWrapper>(log_level, model_path, "bigeye");
 
 		const int64_t shape[4] = {1, BIGEYE_INPUT_CHANNELS, BIGEYE_INPUT_SIZE, BIGEYE_INPUT_SIZE};
-		ORT_SAFE(*inf->wrap, CreateTensorWithDataAsOrtValue( //
-		                         inf->wrap->meminfo,         //
-		                         inf->input_data,            //
-		                         sizeof(inf->input_data),    //
-		                         shape,                      //
-		                         4,                          //
+		ORT_SAFE(*inf->wrap, CreateTensorWithDataAsOrtValue(          //
+		                         inf->wrap->meminfo,                  //
+		                         inf->input_data,                     //
+		                         sizeof(inf->input_data),             //
+		                         shape,                               //
+		                         4,                                   //
 		                         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, //
 		                         &inf->input_tensor));
 	} catch (std::exception &e) {

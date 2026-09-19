@@ -6,7 +6,10 @@
  *
  * Captures the combined 800x400 MJPEG stream from the "Bigeye" cameras via
  * the userspace UVC frameserver, runs gaze inference and exposes the result
- * as @ref XRT_INPUT_GENERIC_EYE_GAZE_POSE.
+ * as @ref XRT_INPUT_GENERIC_EYE_GAZE_POSE. The model (BIGEYE_EYE_MODEL) is
+ * normally one trained on the user's own eyes with bigeye_train.py, and a
+ * per-user calibration file from bigeye_calibration corrects the remaining
+ * mapping error. See doc/bigeye-eye-tracking.md.
  *
  * The userspace UVC stack is used instead of V4L2 on purpose: the camera
  * firmware (up to at least v54) reports dwMaxVideoFrameSize = 0 and latches
@@ -80,11 +83,9 @@
 DEBUG_GET_ONCE_LOG_OPTION(bigeye_log, "BIGEYE_LOG", U_LOGGING_INFO)
 DEBUG_GET_ONCE_OPTION(bigeye_model, "BIGEYE_EYE_MODEL", NULL)
 DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_scale, "BIGEYE_GAZE_SCALE_DEG", 45.0)
-// The stock model gives little vertical signal on this hardware; bounding the
-// amplified pitch keeps outliers from throwing the gaze far off.
-DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_pitch_limit, "BIGEYE_PITCH_LIMIT_DEG", 15.0)
-// Extra gain on calibrated pitch: the model has a dead zone around straight
-// ahead so a fit scaled to the extremes compresses the middle.
+// Optional bound and gain on calibrated pitch, for models with a weak
+// vertical response. Off by default; a per-user model needs neither.
+DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_pitch_limit, "BIGEYE_PITCH_LIMIT_DEG", 0.0)
 DEBUG_GET_ONCE_FLOAT_OPTION(bigeye_pitch_gain, "BIGEYE_PITCH_GAIN", 1.0)
 // One-euro filter tuning. Small saccades vanish below the low-speed cutoff,
 // so this runs more responsive than the eye tracking defaults.
@@ -170,8 +171,8 @@ struct bigeye_device
 	//! Training capture stream, see BIGEYE_CAPTURE.
 	FILE *capture;
 
-	//! Per-user fit from the calibration tool: measured = gain * true + bias,
-	//! inverted here. Identity when no calibration file is present.
+	//! Per-user mapping from the calibration tool, see bigeye_load_calibration.
+	//! Identity when no calibration file is present.
 	struct
 	{
 		bool loaded;
@@ -340,11 +341,9 @@ bigeye_process_result(struct bigeye_device *d, const float output[BIGEYE_OUTPUT_
 	m_filter_euro_vec2_run(&d->gaze_filter, timestamp_ns, &(struct xrt_vec2){pitch, yaw}, &filtered);
 
 	struct xrt_space_relation relation = XRT_SPACE_RELATION_ZERO;
-	math_quat_from_euler_angles(&(struct xrt_vec3){.x = filtered.x, .y = -filtered.y},
-	                            &relation.pose.orientation);
+	math_quat_from_euler_angles(&(struct xrt_vec3){.x = filtered.x, .y = -filtered.y}, &relation.pose.orientation);
 	relation.relation_flags = XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT |
-	                          XRT_SPACE_RELATION_ORIENTATION_VALID_BIT |
-	                          XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT;
+	                          XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT;
 
 	m_relation_history_push(d->history, &relation, timestamp_ns);
 }
@@ -452,8 +451,8 @@ bigeye_dump_inputs(struct bigeye_device *d)
 	const uint8_t *right = d->ring[d->ring_head][0];
 	const uint8_t *left = d->ring[d->ring_head][1];
 	for (int y = 0; y < S; y++) {
-		fwrite(left + y * S, 1, S, f);   // left eye on the left
-		fwrite(right + y * S, 1, S, f);  // right eye on the right
+		fwrite(left + y * S, 1, S, f);  // left eye on the left
+		fwrite(right + y * S, 1, S, f); // right eye on the right
 	}
 	fclose(f);
 }
@@ -463,8 +462,7 @@ bigeye_sink_push_frame(struct xrt_frame_sink *xfs, struct xrt_frame *xf)
 {
 	struct bigeye_device *d = container_of(xfs, struct bigeye_device, sink);
 
-	if (xf->format != XRT_FORMAT_R8G8B8 || xf->width != BIGEYE_FRAME_WIDTH ||
-	    xf->height != BIGEYE_FRAME_HEIGHT) {
+	if (xf->format != XRT_FORMAT_R8G8B8 || xf->width != BIGEYE_FRAME_WIDTH || xf->height != BIGEYE_FRAME_HEIGHT) {
 		BIGEYE_WARN(d, "Unexpected frame %ux%u format %u", xf->width, xf->height, xf->format);
 		return;
 	}
