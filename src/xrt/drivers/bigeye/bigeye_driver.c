@@ -147,6 +147,11 @@ struct bigeye_device
 	struct os_mutex mutex;
 	//! Requested via xrt_device::begin_feature, protected by mutex.
 	bool feature_enabled;
+	//! begin/end_feature balance; the camera streams only while non-zero.
+	int feature_users;
+	bool streaming;
+	//! Head of the sink chain the frameserver pushes into.
+	struct xrt_frame_sink *stream_sink;
 
 	// Runtime adjustable via u_var until proper calibration exists.
 	float gaze_scale_deg;
@@ -653,9 +658,18 @@ bigeye_begin_feature(struct xrt_device *xdev, enum xrt_device_feature_type type)
 
 	os_mutex_lock(&d->mutex);
 	d->feature_enabled = true;
+	bool start = d->feature_users++ == 0 && !d->streaming;
+	if (start) {
+		// Cameras and illuminators only run while something uses gaze.
+		d->ring_count = 0;
+		d->streaming = xrt_fs_stream_start(d->xfs, d->stream_sink, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
+		if (!d->streaming) {
+			BIGEYE_ERROR(d, "Failed to start camera stream");
+		}
+	}
 	os_mutex_unlock(&d->mutex);
 
-	BIGEYE_DEBUG(d, "Eye tracking enabled");
+	BIGEYE_INFO(d, "Eye tracking enabled (%d users)", d->feature_users);
 
 	return XRT_SUCCESS;
 }
@@ -670,10 +684,18 @@ bigeye_end_feature(struct xrt_device *xdev, enum xrt_device_feature_type type)
 	}
 
 	os_mutex_lock(&d->mutex);
-	d->feature_enabled = false;
+	if (d->feature_users > 0) {
+		d->feature_users--;
+	}
+	bool stop = d->feature_users == 0 && d->streaming;
+	if (stop) {
+		d->feature_enabled = false;
+		xrt_fs_stream_stop(d->xfs);
+		d->streaming = false;
+	}
 	os_mutex_unlock(&d->mutex);
 
-	BIGEYE_DEBUG(d, "Eye tracking disabled");
+	BIGEYE_INFO(d, "Eye tracking disabled (%d users)", d->feature_users);
 
 	return XRT_SUCCESS;
 }
@@ -685,7 +707,10 @@ bigeye_destroy(struct xrt_device *xdev)
 
 	u_var_remove_root(d);
 
-	// Stops streaming and destroys the frameserver.
+	if (d->streaming) {
+		xrt_fs_stream_stop(d->xfs);
+		d->streaming = false;
+	}
 	xrt_frame_context_destroy_nodes(&d->xfctx);
 
 	os_thread_helper_destroy(&d->usb_thread);
@@ -844,10 +869,8 @@ bigeye_device_create(struct xrt_device *head)
 	struct xrt_frame_sink *queue = NULL;
 	u_sink_queue_create(&d->xfctx, 2, converter, &queue);
 
-	if (!xrt_fs_stream_start(d->xfs, queue, XRT_FS_CAPTURE_TYPE_TRACKING, 0)) {
-		BIGEYE_ERROR(d, "Failed to start camera stream");
-		goto error;
-	}
+	// Streaming starts in begin_feature, when an application uses gaze.
+	d->stream_sink = queue;
 
 	// Device setup.
 	d->base.name = XRT_DEVICE_EYE_GAZE_INTERACTION;
