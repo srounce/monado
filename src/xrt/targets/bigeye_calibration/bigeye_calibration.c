@@ -67,6 +67,7 @@ static const struct target targets[] = {
 struct sample_stats
 {
 	double sum_yaw, sum_pitch;
+	double sq_yaw, sq_pitch;
 	int count;
 };
 
@@ -124,26 +125,80 @@ grey_env(const char *name, float def_srgb)
 	return srgb_to_linear(s);
 }
 
-// Least squares fit y = a*x + b.
-static bool
-fit_line(const double *x, const double *y, int n, double *a, double *b)
+// Maps raw driver output (yaw, pitch) to true gaze angles with a quadratic
+// in both inputs: true = c0 + c1*y + c2*p + c3*y^2 + c4*p^2 + c5*y*p. The
+// cross term is what handles the model's axis coupling; independent per-axis
+// fits cannot.
+#define POLY_TERMS 6
+
+static void
+poly_terms(double y, double p, double t[POLY_TERMS])
 {
-	double sx = 0, sy = 0, sxx = 0, sxy = 0;
-	for (int i = 0; i < n; i++) {
-		sx += x[i];
-		sy += y[i];
-		sxx += x[i] * x[i];
-		sxy += x[i] * y[i];
-	}
-	double denom = n * sxx - sx * sx;
-	if (fabs(denom) < 1e-9) {
-		return false;
-	}
-	*a = (n * sxy - sx * sy) / denom;
-	*b = (sy - *a * sx) / n;
-	return true;
+	t[0] = 1;
+	t[1] = y;
+	t[2] = p;
+	t[3] = y * y;
+	t[4] = p * p;
+	t[5] = y * p;
 }
 
+static double
+poly_eval(const double c[POLY_TERMS], double y, double p)
+{
+	double t[POLY_TERMS];
+	poly_terms(y, p, t);
+	double r = 0;
+	for (int i = 0; i < POLY_TERMS; i++) {
+		r += c[i] * t[i];
+	}
+	return r;
+}
+
+// Least squares via normal equations, Gaussian elimination with pivoting.
+static bool
+fit_poly(const double *ry, const double *rp, const double *truth, int n, double c[POLY_TERMS])
+{
+	double a[POLY_TERMS][POLY_TERMS + 1] = {{0}};
+	for (int k = 0; k < n; k++) {
+		double t[POLY_TERMS];
+		poly_terms(ry[k], rp[k], t);
+		for (int i = 0; i < POLY_TERMS; i++) {
+			for (int j = 0; j < POLY_TERMS; j++) {
+				a[i][j] += t[i] * t[j];
+			}
+			a[i][POLY_TERMS] += t[i] * truth[k];
+		}
+	}
+	for (int i = 0; i < POLY_TERMS; i++) {
+		int piv = i;
+		for (int r = i + 1; r < POLY_TERMS; r++) {
+			if (fabs(a[r][i]) > fabs(a[piv][i])) {
+				piv = r;
+			}
+		}
+		if (fabs(a[piv][i]) < 1e-12) {
+			return false;
+		}
+		for (int j = 0; j <= POLY_TERMS; j++) {
+			double tmp = a[i][j];
+			a[i][j] = a[piv][j];
+			a[piv][j] = tmp;
+		}
+		for (int r = 0; r < POLY_TERMS; r++) {
+			if (r == i) {
+				continue;
+			}
+			double f = a[r][i] / a[i][i];
+			for (int j = i; j <= POLY_TERMS; j++) {
+				a[r][j] -= f * a[i][j];
+			}
+		}
+	}
+	for (int i = 0; i < POLY_TERMS; i++) {
+		c[i] = a[i][POLY_TERMS] / a[i][i];
+	}
+	return true;
+}
 
 /*
  *
@@ -531,6 +586,8 @@ main(void)
 				gaze_angles_from_quat(loc.pose.orientation, &gy, &gp);
 				stats[phase].sum_yaw += gy;
 				stats[phase].sum_pitch += gp;
+				stats[phase].sq_yaw += gy * gy;
+				stats[phase].sq_pitch += gp * gp;
 				stats[phase].count++;
 			}
 		}
@@ -572,7 +629,7 @@ main(void)
 	double tx_yaw[NUM_TARGETS], m_yaw[NUM_TARGETS];
 	double tx_pitch[NUM_TARGETS], m_pitch[NUM_TARGETS];
 	int n = 0;
-	printf("\n%8s %8s | %8s %8s | samples\n", "tgt yaw", "tgt pit", "meas yaw", "meas pit");
+	printf("\n%8s %8s | %8s %8s | %6s %6s | samples\n", "tgt yaw", "tgt pit", "meas yaw", "meas pit", "sd yaw", "sd pit");
 	for (size_t i = 0; i < NUM_TARGETS; i++) {
 		if (stats[i].count < 10) {
 			printf("%8.1f %8.1f | %17s | %d (skipped)\n", (double)targets[i].yaw_deg,
@@ -583,21 +640,35 @@ main(void)
 		m_yaw[n] = stats[i].sum_yaw / stats[i].count;
 		tx_pitch[n] = targets[i].pitch_deg;
 		m_pitch[n] = stats[i].sum_pitch / stats[i].count;
-		printf("%8.1f %8.1f | %8.2f %8.2f | %d\n", tx_yaw[n], tx_pitch[n], m_yaw[n], m_pitch[n],
-		       stats[i].count);
+		double sd_y = sqrt(fmax(stats[i].sq_yaw / stats[i].count - m_yaw[n] * m_yaw[n], 0.0));
+		double sd_p = sqrt(fmax(stats[i].sq_pitch / stats[i].count - m_pitch[n] * m_pitch[n], 0.0));
+		printf("%8.1f %8.1f | %8.2f %8.2f | %6.2f %6.2f | %d\n", tx_yaw[n], tx_pitch[n], m_yaw[n], m_pitch[n], sd_y,
+		       sd_p, stats[i].count);
 		n++;
 	}
 
-	double ay, by, ap, bp;
-	if (n < 4 || !fit_line(tx_yaw, m_yaw, n, &ay, &by) || !fit_line(tx_pitch, m_pitch, n, &ap, &bp)) {
+	double cy[POLY_TERMS], cp[POLY_TERMS];
+	if (n < 10 || !fit_poly(m_yaw, m_pitch, tx_yaw, n, cy) || !fit_poly(m_yaw, m_pitch, tx_pitch, n, cp)) {
 		fprintf(stderr, "not enough valid data to fit\n");
 		return 1;
 	}
 
-	printf("\nfit: measured_yaw   = %+.3f * true + %+.2f\n", ay, by);
-	printf("fit: measured_pitch = %+.3f * true + %+.2f\n", ap, bp);
-	if (fabs(ay) < 0.05 || fabs(ap) < 0.05) {
-		fprintf(stderr, "WARNING: near-zero gain, calibration unreliable\n");
+	// Residuals of the fit at the calibration points themselves.
+	double max_err = 0;
+	printf("\nfit residuals (fitted - target):\n");
+	for (int i = 0; i < n; i++) {
+		double ey = poly_eval(cy, m_yaw[i], m_pitch[i]) - tx_yaw[i];
+		double ep = poly_eval(cp, m_yaw[i], m_pitch[i]) - tx_pitch[i];
+		printf("%8.1f %8.1f | yaw %+6.2f  pitch %+6.2f\n", tx_yaw[i], tx_pitch[i], ey, ep);
+		max_err = fmax(max_err, fmax(fabs(ey), fabs(ep)));
+	}
+	printf("max residual %.2f deg\n", max_err);
+
+	if (getenv("BIGEYE_CALIB_DRY_RUN") != NULL) {
+		printf("dry run, not writing calibration\n");
+		xrDestroySession(session);
+		xrDestroyInstance(instance);
+		return 0;
 	}
 
 	const char *home = getenv("HOME");
@@ -610,9 +681,15 @@ main(void)
 		fprintf(stderr, "cannot write %s\n", path);
 		return 1;
 	}
-	fprintf(f,
-	        "{\n\t\"yaw_gain\": %.4f,\n\t\"yaw_bias\": %.3f,\n\t\"pitch_gain\": %.4f,\n\t\"pitch_bias\": %.3f\n}\n",
-	        ay, by, ap, bp);
+	fprintf(f, "{\n\t\"yaw_poly\": [");
+	for (int i = 0; i < POLY_TERMS; i++) {
+		fprintf(f, "%s%.6g", i ? ", " : "", cy[i]);
+	}
+	fprintf(f, "],\n\t\"pitch_poly\": [");
+	for (int i = 0; i < POLY_TERMS; i++) {
+		fprintf(f, "%s%.6g", i ? ", " : "", cp[i]);
+	}
+	fprintf(f, "]\n}\n");
 	fclose(f);
 	printf("wrote %s\n", path);
 

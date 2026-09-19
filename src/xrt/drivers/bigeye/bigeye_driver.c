@@ -84,6 +84,12 @@ DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_a_x, "BIGEYE_CROP_A_X", BIGEYE_CROP_A_X)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_b_x, "BIGEYE_CROP_B_X", BIGEYE_CROP_B_X)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_y, "BIGEYE_CROP_Y", BIGEYE_CROP_Y)
 DEBUG_GET_ONCE_OPTION(bigeye_dump, "BIGEYE_DUMP", NULL)
+// Eye image orientation relative to what the model was trained on. The Beyond
+// 2e cameras are mirrored versus the reference rig; with the wrong orientation
+// one eye's yaw inverts and the lid-weighted average cancels most of it.
+DEBUG_GET_ONCE_BOOL_OPTION(bigeye_flip_a, "BIGEYE_FLIP_A", true)
+DEBUG_GET_ONCE_BOOL_OPTION(bigeye_flip_b, "BIGEYE_FLIP_B", true)
+DEBUG_GET_ONCE_BOOL_OPTION(bigeye_swap, "BIGEYE_SWAP_EYES", true)
 
 enum bigeye_input_index
 {
@@ -139,6 +145,7 @@ struct bigeye_device
 	//! in frame across the gaze range. A = left half, B = right half.
 	int crop_size;
 	int crop_a_x, crop_b_x, crop_y;
+	bool flip_a, flip_b, swap_eyes;
 
 	//! When set, dump the two preprocessed 128x128 model inputs as PGM to
 	//! this path every few frames, for offline crop inspection.
@@ -151,8 +158,12 @@ struct bigeye_device
 	{
 		bool loaded;
 		bool apply;
-		float yaw_gain, yaw_bias;
-		float pitch_gain, pitch_bias;
+		bool poly;
+		// true = c0 + c1*y + c2*p + c3*y^2 + c4*p^2 + c5*y*p, degrees.
+		float yaw_poly[6], pitch_poly[6];
+		// Older per-axis format.
+		float yaw_bias, yaw_gain_neg, yaw_gain_pos;
+		float pitch_bias, pitch_gain_neg, pitch_gain_pos;
 	} calib;
 };
 
@@ -174,7 +185,7 @@ bigeye_device(struct xrt_device *xdev)
  * 128x128 grayscale (red channel) and histogram-equalize it.
  */
 static void
-preprocess_eye(const struct xrt_frame *xf, int crop_x, int crop_y, int crop_size, uint8_t *out)
+preprocess_eye(const struct xrt_frame *xf, int crop_x, int crop_y, int crop_size, bool flip, uint8_t *out)
 {
 	const float scale = (float)crop_size / BIGEYE_INPUT_SIZE;
 	const uint8_t *data = xf->data;
@@ -193,6 +204,10 @@ preprocess_eye(const struct xrt_frame *xf, int crop_x, int crop_y, int crop_size
 			float wx = fx - ix;
 			int x0 = crop_x + ix;
 			int x1 = x0 + 1 < crop_x + crop_size ? x0 + 1 : x0;
+			if (flip) {
+				x0 = 2 * crop_x + crop_size - 1 - x0;
+				x1 = 2 * crop_x + crop_size - 1 - x1;
+			}
 
 			float p00 = data[y0 * stride + x0 * 3];
 			float p01 = data[y0 * stride + x1 * 3];
@@ -272,11 +287,22 @@ bigeye_process_result(struct bigeye_device *d, const float output[BIGEYE_OUTPUT_
 	pitch += d->pitch_offset_deg * ((float)M_PI / 180.0f);
 	yaw += d->yaw_offset_deg * ((float)M_PI / 180.0f);
 
-	if (d->calib.loaded && d->calib.apply) {
-		float bias_p = d->calib.pitch_bias * ((float)M_PI / 180.0f);
-		float bias_y = d->calib.yaw_bias * ((float)M_PI / 180.0f);
-		pitch = (pitch - bias_p) / d->calib.pitch_gain;
-		yaw = (yaw - bias_y) / d->calib.yaw_gain;
+	if (d->calib.loaded && d->calib.apply && d->calib.poly) {
+		const float k = 180.0f / (float)M_PI;
+		float y = yaw * k, p = pitch * k;
+		float t[6] = {1, y, p, y * y, p * p, y * p};
+		float ny = 0, np = 0;
+		for (int i = 0; i < 6; i++) {
+			ny += d->calib.yaw_poly[i] * t[i];
+			np += d->calib.pitch_poly[i] * t[i];
+		}
+		yaw = ny / k;
+		pitch = np / k;
+	} else if (d->calib.loaded && d->calib.apply) {
+		pitch -= d->calib.pitch_bias * ((float)M_PI / 180.0f);
+		yaw -= d->calib.yaw_bias * ((float)M_PI / 180.0f);
+		pitch /= pitch < 0 ? d->calib.pitch_gain_neg : d->calib.pitch_gain_pos;
+		yaw /= yaw < 0 ? d->calib.yaw_gain_neg : d->calib.yaw_gain_pos;
 	}
 
 	struct xrt_vec2 filtered;
@@ -313,21 +339,48 @@ bigeye_load_calibration(struct bigeye_device *d)
 		return;
 	}
 
-	bool ok = u_json_get_float(u_json_get(json, "yaw_gain"), &d->calib.yaw_gain) &&
-	          u_json_get_float(u_json_get(json, "yaw_bias"), &d->calib.yaw_bias) &&
-	          u_json_get_float(u_json_get(json, "pitch_gain"), &d->calib.pitch_gain) &&
-	          u_json_get_float(u_json_get(json, "pitch_bias"), &d->calib.pitch_bias);
+	bool ok;
+	if (u_json_get(json, "yaw_poly") != NULL) {
+		ok = u_json_get_float_array(u_json_get(json, "yaw_poly"), d->calib.yaw_poly, 6) == 6 &&
+		     u_json_get_float_array(u_json_get(json, "pitch_poly"), d->calib.pitch_poly, 6) == 6;
+		cJSON_Delete(json);
+		if (!ok) {
+			BIGEYE_WARN(d, "Invalid polynomial calibration in %s, ignoring", path);
+			return;
+		}
+		d->calib.poly = true;
+		d->calib.loaded = true;
+		d->calib.apply = true;
+		BIGEYE_INFO(d, "Loaded quadratic calibration from %s", path);
+		return;
+	}
+	ok = u_json_get_float(u_json_get(json, "yaw_bias"), &d->calib.yaw_bias) &&
+	     u_json_get_float(u_json_get(json, "pitch_bias"), &d->calib.pitch_bias);
+	// Piecewise gains per sign; a single-gain file (older format) applies to both.
+	if (ok && u_json_get(json, "yaw_gain_neg") != NULL) {
+		ok = u_json_get_float(u_json_get(json, "yaw_gain_neg"), &d->calib.yaw_gain_neg) &&
+		     u_json_get_float(u_json_get(json, "yaw_gain_pos"), &d->calib.yaw_gain_pos) &&
+		     u_json_get_float(u_json_get(json, "pitch_gain_neg"), &d->calib.pitch_gain_neg) &&
+		     u_json_get_float(u_json_get(json, "pitch_gain_pos"), &d->calib.pitch_gain_pos);
+	} else if (ok) {
+		ok = u_json_get_float(u_json_get(json, "yaw_gain"), &d->calib.yaw_gain_neg) &&
+		     u_json_get_float(u_json_get(json, "pitch_gain"), &d->calib.pitch_gain_neg);
+		d->calib.yaw_gain_pos = d->calib.yaw_gain_neg;
+		d->calib.pitch_gain_pos = d->calib.pitch_gain_neg;
+	}
 	cJSON_Delete(json);
 
-	if (!ok || fabsf(d->calib.yaw_gain) < 0.01f || fabsf(d->calib.pitch_gain) < 0.01f) {
+	if (!ok || fabsf(d->calib.yaw_gain_neg) < 0.01f || fabsf(d->calib.yaw_gain_pos) < 0.01f ||
+	    fabsf(d->calib.pitch_gain_neg) < 0.01f || fabsf(d->calib.pitch_gain_pos) < 0.01f) {
 		BIGEYE_WARN(d, "Invalid calibration in %s, ignoring", path);
 		return;
 	}
 
 	d->calib.loaded = true;
 	d->calib.apply = true;
-	BIGEYE_INFO(d, "Loaded calibration: yaw %.3f*x%+.2f, pitch %.3f*x%+.2f", d->calib.yaw_gain,
-	            d->calib.yaw_bias, d->calib.pitch_gain, d->calib.pitch_bias);
+	BIGEYE_INFO(d, "Loaded calibration: yaw bias %+.2f gain %.3f/%.3f, pitch bias %+.2f gain %.3f/%.3f",
+	            d->calib.yaw_bias, d->calib.yaw_gain_neg, d->calib.yaw_gain_pos, d->calib.pitch_bias,
+	            d->calib.pitch_gain_neg, d->calib.pitch_gain_pos);
 }
 
 // 3 frames/s for 40 s, enough to cover a full calibration run.
@@ -381,8 +434,10 @@ bigeye_sink_push_frame(struct xrt_frame_sink *xfs, struct xrt_frame *xf)
 
 	d->ring_head = (d->ring_head + 1) % BIGEYE_INPUT_FRAMES;
 	// Channel 0 is the right image half (B), channel 1 the left half (A).
-	preprocess_eye(xf, BIGEYE_FRAME_WIDTH / 2 + d->crop_b_x, d->crop_y, d->crop_size, d->ring[d->ring_head][0]);
-	preprocess_eye(xf, d->crop_a_x, d->crop_y, d->crop_size, d->ring[d->ring_head][1]);
+	int ch_b = d->swap_eyes ? 1 : 0;
+	preprocess_eye(xf, BIGEYE_FRAME_WIDTH / 2 + d->crop_b_x, d->crop_y, d->crop_size, d->flip_b,
+	               d->ring[d->ring_head][ch_b]);
+	preprocess_eye(xf, d->crop_a_x, d->crop_y, d->crop_size, d->flip_a, d->ring[d->ring_head][1 - ch_b]);
 
 	if (d->dump_path != NULL && ++d->dump_counter % BIGEYE_DUMP_INTERVAL == 0) {
 		bigeye_dump_inputs(d);
@@ -655,6 +710,9 @@ bigeye_device_create(struct xrt_device *head)
 	d->crop_b_x = (int)debug_get_num_option_bigeye_crop_b_x();
 	d->crop_y = (int)debug_get_num_option_bigeye_crop_y();
 	d->dump_path = debug_get_option_bigeye_dump();
+	d->flip_a = debug_get_bool_option_bigeye_flip_a();
+	d->flip_b = debug_get_bool_option_bigeye_flip_b();
+	d->swap_eyes = debug_get_bool_option_bigeye_swap();
 	d->sink.push_frame = bigeye_sink_push_frame;
 
 	os_mutex_init(&d->mutex);
@@ -675,6 +733,9 @@ bigeye_device_create(struct xrt_device *head)
 	u_var_add_i32(d, &d->crop_a_x, "Crop left X (px)");
 	u_var_add_i32(d, &d->crop_b_x, "Crop right X (px)");
 	u_var_add_i32(d, &d->crop_y, "Crop Y (px)");
+	u_var_add_bool(d, &d->flip_a, "Flip left image");
+	u_var_add_bool(d, &d->flip_b, "Flip right image");
+	u_var_add_bool(d, &d->swap_eyes, "Swap eyes");
 
 	bigeye_load_calibration(d);
 
