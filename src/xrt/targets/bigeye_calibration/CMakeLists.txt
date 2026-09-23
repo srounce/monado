@@ -20,3 +20,6 @@ target_link_libraries(
 		xrt-external-openxr
 		m
 	)
+
+install(TARGETS bigeye_calibration RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(PROGRAMS bigeye_train.py DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME bigeye_train)
