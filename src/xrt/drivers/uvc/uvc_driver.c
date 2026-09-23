@@ -271,11 +271,23 @@ process_payload(struct uvc_fs *stream, unsigned char *payload, size_t len)
 	}
 
 	if (stream->frame_collected == stream->frame_size || is_eof) {
-		stream->cur_frame->size = stream->frame_collected;
-		if (stream->sink) {
-			xrt_sink_push_frame(stream->sink, stream->cur_frame);
+		bool valid = true;
+		if (stream->parameters.format == XRT_FORMAT_MJPEG) {
+			// A frame whose first packets were lost starts mid-stream and
+			// would only produce decoder errors downstream.
+			const uint8_t *data = stream->cur_frame->data;
+			valid = stream->frame_collected >= 4 && data[0] == 0xFF && data[1] == 0xD8;
 		}
-		u_sink_debug_push_frame(&stream->usd, stream->cur_frame);
+		if (valid) {
+			stream->good_frames++;
+			stream->cur_frame->size = stream->frame_collected;
+			if (stream->sink) {
+				xrt_sink_push_frame(stream->sink, stream->cur_frame);
+			}
+			u_sink_debug_push_frame(&stream->usd, stream->cur_frame);
+		} else {
+			stream->bad_frames++;
+		}
 		stream->frame_collected = 0;
 		xrt_frame_reference(&stream->cur_frame, NULL);
 	}
@@ -296,6 +308,26 @@ uvc_fs_set_source_timestamp_callback(struct xrt_fs *fs, get_frame_timestamp_t ca
 	stream->get_frame_timestamp_user_data = user_data;
 }
 
+// Once a second while anything is wrong, so a persistent fault is one line
+// per second in the log with the counts rather than a message per frame.
+static void
+uvc_report_health(struct uvc_fs *stream)
+{
+	if (stream->bad_packets == 0 && stream->bad_frames == 0) {
+		return;
+	}
+	timepoint_ns now = os_monotonic_get_ns();
+	if (now - stream->last_health_report_ns < U_TIME_1S_IN_NS) {
+		return;
+	}
+	stream->last_health_report_ns = now;
+	UVC_WARN(stream, "Stream health: %zu bad isoc packets, %zu frames without JPEG header, %zu good frames",
+	         stream->bad_packets, stream->bad_frames, stream->good_frames);
+	stream->bad_packets = 0;
+	stream->bad_frames = 0;
+	stream->good_frames = 0;
+}
+
 static void
 iso_transfer_cb(struct libusb_transfer *transfer)
 {
@@ -304,28 +336,31 @@ iso_transfer_cb(struct libusb_transfer *transfer)
 	int i;
 
 	/* Handle error conditions */
-	if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
-		if (transfer->status != LIBUSB_TRANSFER_CANCELLED)
-			UVC_ERROR(stream, "USB transfer error: %u", transfer->status);
-		stream->active_transfers--;
-		return;
-	}
-
-	if (!stream->is_running) {
+	if (transfer->status == LIBUSB_TRANSFER_CANCELLED || transfer->status == LIBUSB_TRANSFER_NO_DEVICE ||
+	    !stream->is_running) {
 		/* Not resubmitting. Reduce transfer count */
 		stream->active_transfers--;
 		return;
 	}
 
-	/* Handle contained isochronous packets */
-	for (i = 0; i < transfer->num_iso_packets; i++) {
-		unsigned char *payload;
-		size_t payload_len;
-
-		payload = libusb_get_iso_packet_buffer_simple(transfer, i);
-		payload_len = transfer->iso_packet_desc[i].actual_length;
-		process_payload(stream, payload, payload_len);
+	if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
+		// Keep the transfer in the ring: dropping it leaves a permanent
+		// hole in the isochronous schedule for the rest of the stream.
+		UVC_ERROR(stream, "USB transfer error: %u, resubmitting", transfer->status);
+		stream->bad_packets += transfer->num_iso_packets;
+	} else {
+		/* Handle contained isochronous packets */
+		for (i = 0; i < transfer->num_iso_packets; i++) {
+			struct libusb_iso_packet_descriptor *desc = &transfer->iso_packet_desc[i];
+			if (desc->status != LIBUSB_TRANSFER_COMPLETED) {
+				stream->bad_packets++;
+				continue;
+			}
+			process_payload(stream, libusb_get_iso_packet_buffer_simple(transfer, i),
+			                desc->actual_length);
+		}
 	}
+	uvc_report_health(stream);
 
 	/* Resubmit transfer */
 	for (i = 0; i < 5; i++) {
@@ -387,6 +422,12 @@ uvc_fs_stream_stop(struct xrt_fs *xfs)
 	int ret;
 	struct uvc_fs *stream = uvc_fs(xfs);
 
+	// Called from stream users and again from the frame context teardown.
+	if (stream->alloced_frames == NULL) {
+		stream->is_running = false;
+		return true;
+	}
+
 	stream->is_running = false;
 
 	for (size_t i = 0; i < stream->num_transfers; i++) {
@@ -425,6 +466,11 @@ uvc_fs_stream_stop(struct xrt_fs *xfs)
 	}
 	free(stream->alloced_frames);
 	free(stream->free_frames);
+	stream->alloced_frames = NULL;
+	stream->free_frames = NULL;
+	stream->num_alloced_frames = 0;
+	stream->num_free_frames = 0;
+	stream->cur_frame = NULL;
 
 	return true;
 }
@@ -457,6 +503,10 @@ uvc_fs_stream_start(struct xrt_fs *xfs,
 
 	stream->is_running = true;
 	stream->cur_frame = NULL; // we use NULL to mean "no frame yet"
+	stream->frame_collected = 0;
+	stream->bad_packets = 0;
+	stream->bad_frames = 0;
+	stream->good_frames = 0;
 
 	// Allocate frames and put on the free list
 	stream->alloced_frames = calloc(min_frames, sizeof(struct xrt_frame));

@@ -74,6 +74,13 @@ struct uvc_fs
 	struct xrt_frame *alloced_frames;
 	size_t num_alloced_frames;
 
+	//! Stream health: isoc packets with a non-OK status, and MJPEG frames
+	//! that did not start with a JPEG header. Reported rate limited.
+	size_t bad_packets;
+	size_t bad_frames;
+	size_t good_frames;
+	timepoint_ns last_health_report_ns;
+
 	void *get_frame_timestamp_user_data;
 	get_frame_timestamp_t get_frame_timestamp;
 };

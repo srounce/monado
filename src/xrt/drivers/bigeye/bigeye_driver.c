@@ -151,6 +151,11 @@ struct bigeye_device
 	//! begin/end_feature balance; the camera streams only while non-zero.
 	int feature_users;
 	bool streaming;
+	//! Timestamp of the last decoded frame, for the stream watchdog and for
+	//! reporting the gaze as untracked rather than frozen when frames stop.
+	timepoint_ns last_frame_ns;
+	timepoint_ns last_restart_ns;
+	int restarts;
 	//! Head of the sink chain the frameserver pushes into.
 	struct xrt_frame_sink *stream_sink;
 
@@ -202,6 +207,60 @@ bigeye_device(struct xrt_device *xdev)
 {
 	return (struct bigeye_device *)xdev;
 }
+
+
+/*
+ *
+ * Stream control.
+ *
+ */
+
+// No frames for this long while streaming means the stream is stuck, not
+// slow: a healthy stream delivers a frame every 11 ms.
+#define BIGEYE_FRAME_TIMEOUT_NS (U_TIME_1S_IN_NS)
+#define BIGEYE_RESTART_BACKOFF_NS (3 * (timepoint_ns)U_TIME_1S_IN_NS)
+// Beyond this age the last gaze sample is reported as untracked.
+#define BIGEYE_STALE_NS (150 * U_TIME_1MS_IN_NS)
+
+// Caller holds d->mutex.
+static void
+bigeye_stream_start_locked(struct bigeye_device *d)
+{
+	d->ring_count = 0;
+	d->last_frame_ns = os_monotonic_get_ns();
+	d->streaming = xrt_fs_stream_start(d->xfs, d->stream_sink, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
+	if (!d->streaming) {
+		BIGEYE_ERROR(d, "Failed to start camera stream");
+	}
+}
+
+// Caller holds d->mutex.
+static void
+bigeye_stream_stop_locked(struct bigeye_device *d)
+{
+	xrt_fs_stream_stop(d->xfs);
+	d->streaming = false;
+}
+
+// Runs on the USB thread: restart a stream that has stopped producing
+// decodable frames, which re-establishes the isochronous schedule.
+static void
+bigeye_stream_watchdog(struct bigeye_device *d)
+{
+	os_mutex_lock(&d->mutex);
+	timepoint_ns now = os_monotonic_get_ns();
+	if (d->streaming && d->feature_users > 0 && now - d->last_frame_ns > BIGEYE_FRAME_TIMEOUT_NS &&
+	    now - d->last_restart_ns > BIGEYE_RESTART_BACKOFF_NS) {
+		d->restarts++;
+		d->last_restart_ns = now;
+		BIGEYE_WARN(d, "No decodable frames for %.1f s, restarting camera stream (restart %d)",
+		            time_ns_to_s(now - d->last_frame_ns), d->restarts);
+		bigeye_stream_stop_locked(d);
+		bigeye_stream_start_locked(d);
+	}
+	os_mutex_unlock(&d->mutex);
+}
+
 
 
 /*
@@ -475,6 +534,7 @@ bigeye_sink_push_frame(struct xrt_frame_sink *xfs, struct xrt_frame *xf)
 
 	os_mutex_lock(&d->mutex);
 	bool enabled = d->feature_enabled;
+	d->last_frame_ns = xf->timestamp;
 	os_mutex_unlock(&d->mutex);
 
 	// Pick up a rewritten calibration (recenter, recalibration) without restart.
@@ -607,6 +667,8 @@ bigeye_usb_thread(void *ptr)
 			return NULL;
 		}
 
+		bigeye_stream_watchdog(d);
+
 		os_thread_helper_lock(&d->usb_thread);
 	}
 	os_thread_helper_unlock(&d->usb_thread);
@@ -632,6 +694,15 @@ bigeye_get_tracked_pose(struct xrt_device *xdev,
 	if (name != XRT_INPUT_GENERIC_EYE_GAZE_POSE) {
 		BIGEYE_ERROR(d, "Unknown input name");
 		return XRT_ERROR_INPUT_UNSUPPORTED;
+	}
+
+	// Frozen output is worse than none: with no fresh frames report untracked.
+	os_mutex_lock(&d->mutex);
+	bool stale = !d->streaming || os_monotonic_get_ns() - d->last_frame_ns > BIGEYE_STALE_NS;
+	os_mutex_unlock(&d->mutex);
+	if (stale) {
+		*out_relation = (struct xrt_space_relation)XRT_SPACE_RELATION_ZERO;
+		return XRT_SUCCESS;
 	}
 
 	struct xrt_relation_chain chain = {0};
@@ -662,11 +733,7 @@ bigeye_begin_feature(struct xrt_device *xdev, enum xrt_device_feature_type type)
 	bool start = d->feature_users++ == 0 && !d->streaming;
 	if (start) {
 		// Cameras and illuminators only run while something uses gaze.
-		d->ring_count = 0;
-		d->streaming = xrt_fs_stream_start(d->xfs, d->stream_sink, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
-		if (!d->streaming) {
-			BIGEYE_ERROR(d, "Failed to start camera stream");
-		}
+		bigeye_stream_start_locked(d);
 	}
 	os_mutex_unlock(&d->mutex);
 
@@ -691,8 +758,7 @@ bigeye_end_feature(struct xrt_device *xdev, enum xrt_device_feature_type type)
 	bool stop = d->feature_users == 0 && d->streaming;
 	if (stop) {
 		d->feature_enabled = false;
-		xrt_fs_stream_stop(d->xfs);
-		d->streaming = false;
+		bigeye_stream_stop_locked(d);
 	}
 	os_mutex_unlock(&d->mutex);
 
@@ -709,8 +775,7 @@ bigeye_destroy(struct xrt_device *xdev)
 	u_var_remove_root(d);
 
 	if (d->streaming) {
-		xrt_fs_stream_stop(d->xfs);
-		d->streaming = false;
+		bigeye_stream_stop_locked(d);
 	}
 	xrt_frame_context_destroy_nodes(&d->xfctx);
 
