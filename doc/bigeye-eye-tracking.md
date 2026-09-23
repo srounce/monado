@@ -114,6 +114,12 @@ All of these are also adjustable at runtime in the debug GUI.
 
 The cameras stream, and the illuminators are lit, only while an application
 has eye tracking in use; the first gaze samples arrive about half a second
-after that. The blink handling is a simple weight threshold on the lid outputs. There is no
+after that. If decodable frames stop arriving for a second the driver restarts the
+stream, which re-establishes the isochronous schedule, and while no fresh
+frame exists the gaze is reported as untracked rather than frozen. `d/uvc`
+logs a once-per-second "Stream health" line with counts of bad isochronous
+packets and frames missing a JPEG header whenever either is non-zero; a
+persistent fault shows up there. The blink handling is a simple weight
+threshold on the lid outputs. There is no
 automatic detection of the headset moving on the face; recenter or
 recalibrate when it does.
