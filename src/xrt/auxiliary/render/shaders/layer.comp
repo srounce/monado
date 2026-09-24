@@ -449,10 +449,15 @@ vec4 do_projection_inset(vec2 view_uv, uint layer, out float out_inset_blend_fac
 	vec2 uv = vec2(0.0, 0.0);
 	vec4 colour = do_projection_uv(view_uv, layer, uv);
 
-	vec2 negative_edges = smoothstep(0, k_inset_blend_edge, uv);
-	vec2 positive_edges = smoothstep(1.0, 1.0 - k_inset_blend_edge, uv);
-	vec2 inset_blend_factor = min(negative_edges, positive_edges);
-	out_inset_blend_factor = min(inset_blend_factor.x, inset_blend_factor.y);
+	/*
+	 * Fade over a band of k_inset_blend_edge inside each edge. The band is
+	 * measured as a distance to the fully opaque rounded rectangle, so the
+	 * corners are quarter circles rather than the sharp corners a per-axis
+	 * minimum gives.
+	 */
+	vec2 to_edge = min(uv, 1.0 - uv);
+	vec2 into_band = max(vec2(k_inset_blend_edge) - to_edge, vec2(0.0));
+	out_inset_blend_factor = 1.0 - smoothstep(0.0, k_inset_blend_edge, length(into_band));
 
 	return colour;
 }

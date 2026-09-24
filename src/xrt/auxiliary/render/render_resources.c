@@ -22,8 +22,13 @@
 #include "cache/render_compute_pipeline_cache.h"
 #include "cache/render_shader_specialization_helpers.h"
 
+#include "util/u_debug.h"
+#include "util/u_logging.h"
 
 #include <stdio.h>
+
+
+DEBUG_GET_ONCE_FLOAT_OPTION(inset_blend_edge, "XRT_COMPOSITOR_INSET_BLEND_EDGE", RENDER_LAYER_DEFAULT_INSET_BLEND_EDGE)
 
 
 /*
@@ -798,11 +803,17 @@ render_resources_init(struct render_resources *r,
 	    r->pipeline_cache);                  //
 	XVK_CHK_WITH_RET(xret, "render_layer_pipeline_cache_init", false);
 
+	// Fraction of the inset over which it fades into the context, per edge.
+	float inset_blend_edge = debug_get_float_option_inset_blend_edge();
+	if (!(inset_blend_edge >= 0.0f && inset_blend_edge <= 0.5f)) {
+		U_LOG_W("XRT_COMPOSITOR_INSET_BLEND_EDGE must be in [0, 0.5], using %.2f",
+		        RENDER_LAYER_DEFAULT_INSET_BLEND_EDGE);
+		inset_blend_edge = RENDER_LAYER_DEFAULT_INSET_BLEND_EDGE;
+	}
+
 	const struct render_layer_spec layer_variants[] = {
-	    render_make_layer_spec(VK_FALSE, VK_TRUE, r->compute.layer.image_array_size,
-	                           RENDER_LAYER_DEFAULT_INSET_BLEND_EDGE),
-	    render_make_layer_spec(VK_TRUE, VK_TRUE, r->compute.layer.image_array_size,
-	                           RENDER_LAYER_DEFAULT_INSET_BLEND_EDGE),
+	    render_make_layer_spec(VK_FALSE, VK_TRUE, r->compute.layer.image_array_size, inset_blend_edge),
+	    render_make_layer_spec(VK_TRUE, VK_TRUE, r->compute.layer.image_array_size, inset_blend_edge),
 	};
 
 	xret = render_layer_pipeline_cache_prewarm( //
