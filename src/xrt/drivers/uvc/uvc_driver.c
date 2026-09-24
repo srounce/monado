@@ -56,18 +56,76 @@ uvc_fs(struct xrt_fs *xfs)
 }
 
 static void
+uvc_frame_pool_free(struct uvc_frame_pool *pool)
+{
+	for (size_t i = 0; i < pool->count; i++) {
+		free(pool->frames[i].data);
+	}
+	free(pool->frames);
+	free(pool->free_frames);
+	os_mutex_destroy(&pool->lock);
+	free(pool);
+}
+
+static void
 uvc_stream_release_frame(struct xrt_frame *frame)
 {
-	struct uvc_fs *stream = (struct uvc_fs *)frame->owner;
+	struct uvc_frame_pool *pool = (struct uvc_frame_pool *)frame->owner;
 
-	assert(frame->owner == stream);
-	assert(stream->num_free_frames < stream->num_alloced_frames);
-	// assert(frame->data_block_size == stream->frame_size);
+	os_mutex_lock(&pool->lock);
+	assert(pool->num_free < pool->count);
+	pool->free_frames[pool->num_free++] = frame;
+	bool last = pool->retired && pool->num_free == pool->count;
+	os_mutex_unlock(&pool->lock);
 
-	// Put the frame back on the free queue
-	os_mutex_lock(&stream->frames_lock);
-	stream->free_frames[stream->num_free_frames++] = frame;
-	os_mutex_unlock(&stream->frames_lock);
+	if (last) {
+		uvc_frame_pool_free(pool);
+	}
+}
+
+static struct uvc_frame_pool *
+uvc_frame_pool_create(struct uvc_fs *stream, size_t count)
+{
+	struct uvc_frame_pool *pool = U_TYPED_CALLOC(struct uvc_frame_pool);
+	if (os_mutex_init(&pool->lock) < 0) {
+		free(pool);
+		return NULL;
+	}
+	pool->frames = U_TYPED_ARRAY_CALLOC(struct xrt_frame, count);
+	pool->free_frames = U_TYPED_ARRAY_CALLOC(struct xrt_frame *, count);
+	pool->count = count;
+
+	for (size_t i = 0; i < count; i++) {
+		struct xrt_frame *frame = &pool->frames[i];
+		frame->data = calloc(1, stream->frame_size);
+		frame->size = stream->frame_size;
+		frame->stereo_format = XRT_STEREO_FORMAT_NONE;
+		frame->format = stream->parameters.format;
+		frame->stride = stream->parameters.stride;
+		frame->destroy = uvc_stream_release_frame;
+		frame->owner = pool;
+		pool->free_frames[i] = frame;
+	}
+	pool->num_free = count;
+
+	return pool;
+}
+
+/*!
+ * Stop handing out frames. Frees the pool now if no consumer holds a frame,
+ * otherwise the last release frees it.
+ */
+static void
+uvc_frame_pool_retire(struct uvc_frame_pool *pool)
+{
+	os_mutex_lock(&pool->lock);
+	pool->retired = true;
+	bool last = pool->num_free == pool->count;
+	os_mutex_unlock(&pool->lock);
+
+	if (last) {
+		uvc_frame_pool_free(pool);
+	}
 }
 
 int
@@ -185,12 +243,13 @@ process_payload(struct uvc_fs *stream, unsigned char *payload, size_t len)
 
 		// Get a frame to capture into
 		if (stream->cur_frame == NULL) {
-			os_mutex_lock(&stream->frames_lock);
-			if (stream->num_free_frames > 0) {
-				stream->num_free_frames--;
-				xrt_frame_reference(&stream->cur_frame, stream->free_frames[stream->num_free_frames]);
+			struct uvc_frame_pool *pool = stream->pool;
+			os_mutex_lock(&pool->lock);
+			if (pool->num_free > 0) {
+				pool->num_free--;
+				xrt_frame_reference(&stream->cur_frame, pool->free_frames[pool->num_free]);
 			}
-			os_mutex_unlock(&stream->frames_lock);
+			os_mutex_unlock(&pool->lock);
 		}
 
 		stream->frame_id = frame_id;
@@ -423,7 +482,7 @@ uvc_fs_stream_stop(struct xrt_fs *xfs)
 	struct uvc_fs *stream = uvc_fs(xfs);
 
 	// Called from stream users and again from the frame context teardown.
-	if (stream->alloced_frames == NULL) {
+	if (stream->pool == NULL) {
 		stream->is_running = false;
 		return true;
 	}
@@ -459,18 +518,10 @@ uvc_fs_stream_stop(struct xrt_fs *xfs)
 		         strerror(errno));
 	}
 
-	// Free frames
-	for (size_t i = 0; i < stream->num_alloced_frames; i++) {
-		struct xrt_frame frame = stream->alloced_frames[i];
-		free(frame.data);
-	}
-	free(stream->alloced_frames);
-	free(stream->free_frames);
-	stream->alloced_frames = NULL;
-	stream->free_frames = NULL;
-	stream->num_alloced_frames = 0;
-	stream->num_free_frames = 0;
-	stream->cur_frame = NULL;
+	// Consumers may still hold frames, so the pool outlives the stream.
+	xrt_frame_reference(&stream->cur_frame, NULL);
+	uvc_frame_pool_retire(stream->pool);
+	stream->pool = NULL;
 
 	return true;
 }
@@ -508,24 +559,12 @@ uvc_fs_stream_start(struct xrt_fs *xfs,
 	stream->bad_frames = 0;
 	stream->good_frames = 0;
 
-	// Allocate frames and put on the free list
-	stream->alloced_frames = calloc(min_frames, sizeof(struct xrt_frame));
-	stream->free_frames = calloc(min_frames, sizeof(struct xrt_frame *));
-
-	for (size_t i = 0; i < min_frames; i++) {
-		struct xrt_frame frame = {0};
-		frame.data = calloc(1, stream->frame_size);
-		frame.size = stream->frame_size;
-		frame.stereo_format = XRT_STEREO_FORMAT_NONE;
-		frame.format = stream->parameters.format;
-		frame.stride = stream->parameters.stride;
-		frame.destroy = uvc_stream_release_frame;
-
-		frame.owner = stream;
-		stream->alloced_frames[i] = frame;
-		stream->free_frames[i] = &stream->alloced_frames[i];
+	stream->pool = uvc_frame_pool_create(stream, min_frames);
+	if (stream->pool == NULL) {
+		UVC_ERROR(stream, "Failed to create frame pool");
+		stream->is_running = false;
+		return false;
 	}
-	stream->num_free_frames = stream->num_alloced_frames = min_frames;
 
 	// Submit transfers
 	for (size_t i = 0; i < stream->num_transfers; i++) {
@@ -605,11 +644,6 @@ uvc_fs_create(libusb_context *usb_ctx,
 	uvc_get_descriptor_ascii(devh, desc->iSerialNumber, (unsigned char *)stream->base.serial,
 	                         ARRAY_SIZE(stream->base.serial));
 
-	ret = os_mutex_init(&stream->frames_lock);
-	if (ret < 0) {
-		UVC_ERROR(stream, "could not create frame mutex! reason %d", ret);
-		goto error;
-	}
 	stream->usb_ctx = usb_ctx;
 	stream->devh = devh;
 	stream->is_running = false;
@@ -758,8 +792,6 @@ uvc_fs_destroy(struct xrt_fs *xfs)
 		free(stream->transfer);
 		stream->transfer = NULL;
 	}
-
-	os_mutex_destroy(&stream->frames_lock);
 
 	return 0;
 }

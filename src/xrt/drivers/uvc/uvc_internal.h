@@ -22,6 +22,22 @@
 #include "uvc_interface.h"
 
 
+/*!
+ * Fixed pool of frames handed to consumers. Consumers may hold frames after
+ * the stream has stopped, so the pool owns its own lifetime: it is freed by
+ * whichever of stream stop or the last frame release comes second.
+ */
+struct uvc_frame_pool
+{
+	struct os_mutex lock;
+	struct xrt_frame *frames;
+	struct xrt_frame **free_frames;
+	size_t count;
+	size_t num_free;
+	//! Set once the stream has stopped and will not take frames again.
+	bool retired;
+};
+
 struct uvc_fs
 {
 	struct xrt_fs base;
@@ -39,9 +55,8 @@ struct uvc_fs
 
 	struct uvc_stream_parameters parameters;
 
-	struct os_mutex frames_lock;
-	size_t num_free_frames;
-	struct xrt_frame **free_frames;
+	//! Frame pool for the current stream, NULL when stopped.
+	struct uvc_frame_pool *pool;
 
 	//! Frame data destination
 	struct xrt_frame *cur_frame;
@@ -71,8 +86,6 @@ struct uvc_fs
 	libusb_device_handle *devh;
 
 	bool is_running;
-	struct xrt_frame *alloced_frames;
-	size_t num_alloced_frames;
 
 	//! Stream health: isoc packets with a non-OK status, and MJPEG frames
 	//! that did not start with a JPEG header. Reported rate limited.
