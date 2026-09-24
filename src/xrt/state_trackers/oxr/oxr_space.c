@@ -115,7 +115,13 @@ get_xrt_space(struct oxr_logger *log, struct oxr_space *spc, struct xrt_space **
 		             : spc->sess->sys->xso->semantic.stage;
 		break;
 	case OXR_SPACE_TYPE_REFERENCE_UNBOUNDED_MSFT: xspace = spc->sess->sys->xso->semantic.unbounded; break;
-	case OXR_SPACE_TYPE_REFERENCE_COMBINED_EYE_VARJO: xspace = NULL; break;
+	case OXR_SPACE_TYPE_REFERENCE_COMBINED_EYE_VARJO: {
+		XrResult ret = oxr_session_get_gaze_space(log, spc->sess, &xspace);
+		if (ret != XR_SUCCESS) {
+			return ret;
+		}
+		break;
+	}
 	case OXR_SPACE_TYPE_REFERENCE_LOCALIZATION_MAP_ML: xspace = NULL; break;
 	case OXR_SPACE_TYPE_REFERENCE_UNBOUNDED_ANDROID: xspace = NULL; break;
 	}

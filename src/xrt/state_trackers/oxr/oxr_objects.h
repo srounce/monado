@@ -419,6 +419,13 @@ oxr_session_request_exit(struct oxr_logger *log, struct oxr_session *sess);
 XRT_CHECK_RESULT XrResult
 oxr_session_poll(struct oxr_logger *log, struct oxr_session *sess);
 
+/*!
+ * Get the session's eye gaze space, creating it on first use. Returns NULL in
+ * @p out_xspace when the system has no eye gaze device.
+ */
+XrResult
+oxr_session_get_gaze_space(struct oxr_logger *log, struct oxr_session *sess, struct xrt_space **out_xspace);
+
 XrResult
 oxr_session_locate_views(struct oxr_logger *log,
                          struct oxr_session *sess,
@@ -676,6 +683,13 @@ oxr_system_get_hand_tracking_support(struct oxr_logger *log, struct oxr_instance
 
 bool
 oxr_system_get_eye_gaze_support(struct oxr_logger *log, struct oxr_instance *inst);
+
+/*!
+ * True when the system exposes the foveated inset view configuration and
+ * has an eye gaze device to drive the insets with.
+ */
+bool
+oxr_system_get_foveated_rendering_support(struct oxr_logger *log, struct oxr_system *sys);
 
 bool
 oxr_system_get_force_feedback_support(struct oxr_logger *log, struct oxr_instance *inst);
@@ -1103,7 +1117,7 @@ struct oxr_system
 	uint32_t view_config_count;
 	struct oxr_view_config_properties view_configs[XRT_MAX_COMPOSITOR_VIEW_CONFIGS_COUNT];
 
-	XrReferenceSpaceType reference_spaces[5];
+	XrReferenceSpaceType reference_spaces[6];
 	uint32_t reference_space_count;
 
 	struct xrt_visibility_mask *visibility_mask[XRT_MAX_COMPOSITOR_VIEW_CONFIGS_VIEW_COUNT];
@@ -1397,6 +1411,22 @@ struct oxr_session
 	 * IPD, to be expanded to a proper 3D relation.
 	 */
 	float ipd_meters;
+
+	/*!
+	 * Eye gaze used to steer the emulated foveated inset views and to back
+	 * XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO, created on first use.
+	 */
+	struct
+	{
+		//! Pose space on the eyes device, or NULL if not yet created.
+		struct xrt_space *xs;
+
+		//! XRT_DEVICE_FEATURE_EYE_TRACKING held for the lifetime of the session.
+		bool feature_held;
+
+		//! Inset size as a fraction of the context view's tangent extent.
+		float inset_fraction;
+	} gaze;
 
 	/*!
 	 * Frame timing debug output.

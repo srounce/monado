@@ -209,6 +209,34 @@ view_configuration_type_fill_in(XrViewConfigurationType *target, struct oxr_view
 	*target = source->view_config_type;
 }
 
+#ifdef OXR_HAVE_VARJO_foveated_rendering
+DEBUG_GET_ONCE_NUM_OPTION(foveated_context_scale_percentage, "OXR_FOVEATED_CONTEXT_SCALE_PERCENTAGE", 60)
+
+//! Only emulated insets are steered by the state tracker; native quad view devices size their own views.
+static bool
+is_context_view_emulated(struct oxr_system *sys)
+{
+	struct xrt_device *head = GET_STATIC_XDEV_BY_ROLE(sys, head);
+	return head != NULL && !head->supported.get_views_quad;
+}
+
+/*!
+ * With the insets following the gaze the context views carry less detail,
+ * so recommend a smaller size for them.
+ */
+static void
+scale_context_view_recommended_size(XrViewConfigurationView *view)
+{
+	long percentage = debug_get_num_option_foveated_context_scale_percentage();
+	if (percentage < 1 || percentage > 100) {
+		return;
+	}
+
+	view->recommendedImageRectWidth = (uint32_t)(view->recommendedImageRectWidth * percentage / 100);
+	view->recommendedImageRectHeight = (uint32_t)(view->recommendedImageRectHeight * percentage / 100);
+}
+#endif
+
 static void
 view_configuration_view_fill_in(XrViewConfigurationView *target_view, XrViewConfigurationView *source_view)
 {
@@ -403,7 +431,7 @@ oxr_system_fill_in(
 	 * Reference space support.
 	 */
 
-	static_assert(5 <= ARRAY_SIZE(sys->reference_spaces), "Not enough space in array");
+	static_assert(6 <= ARRAY_SIZE(sys->reference_spaces), "Not enough space in array");
 
 	if (sys->xso->semantic.view != NULL) {
 		sys->reference_spaces[sys->reference_space_count++] = XR_REFERENCE_SPACE_TYPE_VIEW;
@@ -450,6 +478,12 @@ oxr_system_fill_in(
 	}
 #endif
 
+#ifdef OXR_HAVE_VARJO_foveated_rendering
+	if (sys->inst->extensions.VARJO_foveated_rendering && oxr_system_get_eye_gaze_support(log, sys->inst)) {
+		sys->reference_spaces[sys->reference_space_count++] = XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO;
+	}
+#endif
+
 
 	/*
 	 * Misc
@@ -493,6 +527,15 @@ oxr_system_get_eye_gaze_support(struct oxr_logger *log, struct oxr_instance *ins
 	struct xrt_device *eyes = GET_STATIC_XDEV_BY_ROLE(sys, eyes);
 
 	return eyes && eyes->supported.eye_gaze;
+}
+
+bool
+oxr_system_get_foveated_rendering_support(struct oxr_logger *log, struct oxr_system *sys)
+{
+	bool has_inset_config =
+	    get_view_config_properties(sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET) != NULL;
+
+	return has_inset_config && oxr_system_get_eye_gaze_support(log, sys->inst);
 }
 
 bool
@@ -677,6 +720,19 @@ oxr_system_get_properties(struct oxr_logger *log, struct oxr_system *sys, XrSyst
 
 	if (eye_gaze_props) {
 		eye_gaze_props->supportsEyeGazeInteraction = oxr_system_get_eye_gaze_support(log, sys->inst);
+	}
+#endif
+
+#ifdef OXR_HAVE_VARJO_foveated_rendering
+	XrSystemFoveatedRenderingPropertiesVARJO *foveated_props = NULL;
+	if (sys->inst->extensions.VARJO_foveated_rendering) {
+		foveated_props =
+		    OXR_GET_OUTPUT_FROM_CHAIN(properties, XR_TYPE_SYSTEM_FOVEATED_RENDERING_PROPERTIES_VARJO,
+		                              XrSystemFoveatedRenderingPropertiesVARJO);
+	}
+
+	if (foveated_props) {
+		foveated_props->supportsFoveatedRendering = oxr_system_get_foveated_rendering_support(log, sys);
 	}
 #endif
 
@@ -923,6 +979,23 @@ oxr_system_enumerate_view_conf_views(struct oxr_logger *log,
 		return oxr_error(log, XR_ERROR_RUNTIME_FAILURE, "Didn't find view configs");
 	}
 
-	OXR_TWO_CALL_FILL_IN_HELPER(log, viewCapacityInput, viewCountOutput, views, props->view_count,
-	                            view_configuration_view_fill_in, props->views, XR_SUCCESS);
+	OXR_TWO_CALL_CHECK_ONLY(log, viewCapacityInput, viewCountOutput, props->view_count, XR_SUCCESS);
+
+	for (uint32_t i = 0; i < props->view_count; i++) {
+		view_configuration_view_fill_in(&views[i], &props->views[i]);
+
+#ifdef OXR_HAVE_VARJO_foveated_rendering
+		if (i < 2 && viewConfigurationType == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET &&
+		    sys->inst->extensions.VARJO_foveated_rendering && is_context_view_emulated(sys)) {
+			const XrFoveatedViewConfigurationViewVARJO *foveated =
+			    OXR_GET_INPUT_FROM_CHAIN(&views[i], XR_TYPE_FOVEATED_VIEW_CONFIGURATION_VIEW_VARJO,
+			                             XrFoveatedViewConfigurationViewVARJO);
+			if (foveated != NULL && foveated->foveatedRenderingActive) {
+				scale_context_view_recommended_size(&views[i]);
+			}
+		}
+#endif
+	}
+
+	return XR_SUCCESS;
 }

@@ -434,6 +434,13 @@ oxr_verify_extensions(struct oxr_logger *log, const struct oxr_extension_status 
 	}
 #endif
 
+#ifdef OXR_HAVE_VARJO_foveated_rendering
+	if (extensions->VARJO_foveated_rendering && !extensions->VARJO_quad_views) {
+		return oxr_error(log, XR_ERROR_VALIDATION_FAILURE,
+		                 "XR_VARJO_foveated_rendering requires XR_VARJO_quad_views");
+	}
+#endif
+
 	return XR_SUCCESS;
 }
 

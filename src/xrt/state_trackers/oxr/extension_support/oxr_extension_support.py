@@ -115,6 +115,7 @@ EXTENSIONS = (
     ['XR_MSFT_hand_interaction', 'XRT_FEATURE_OPENXR_INTERACTION_MSFT_HAND'],
     ['XR_MSFT_unbounded_reference_space', 'XRT_FEATURE_OPENXR_SPACE_UNBOUNDED'],
     ['XR_OPPO_controller_interaction', 'XRT_FEATURE_OPENXR_INTERACTION_OPPO'],
+    ['XR_VARJO_foveated_rendering', 'XRT_FEATURE_OPENXR_VARJO_FOVEATED_RENDERING', 'XRT_FEATURE_OPENXR_VARJO_QUAD_VIEWS'],
     ['XR_VARJO_quad_views', 'XRT_FEATURE_OPENXR_VARJO_QUAD_VIEWS'],
     # Experimental extensions, sorted alphabetically.
     ['XR_EXTX_overlay', 'XRT_FEATURE_OPENXR_OVERLAY'],

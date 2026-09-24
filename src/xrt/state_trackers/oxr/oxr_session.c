@@ -62,6 +62,7 @@
 DEBUG_GET_ONCE_NUM_OPTION(ipd, "OXR_DEBUG_IPD_MM", 63)
 DEBUG_GET_ONCE_NUM_OPTION(wait_frame_sleep, "OXR_DEBUG_WAIT_FRAME_EXTRA_SLEEP_MS", 0)
 DEBUG_GET_ONCE_BOOL_OPTION(frame_timing_spew, "OXR_FRAME_TIMING_SPEW", false)
+DEBUG_GET_ONCE_FLOAT_OPTION(foveated_inset_fraction, "OXR_FOVEATED_INSET_FRACTION", 0.5)
 
 
 /*
@@ -240,9 +241,139 @@ handle_reference_space_change_pending(struct oxr_logger *log,
 
 /*
  *
+ * Eye gaze helpers.
+ *
+ */
+
+XrResult
+oxr_session_get_gaze_space(struct oxr_logger *log, struct oxr_session *sess, struct xrt_space **out_xspace)
+{
+	struct oxr_system *sys = sess->sys;
+
+	if (sess->gaze.xs == NULL) {
+		struct xrt_device *eyes = GET_STATIC_XDEV_BY_ROLE(sys, eyes);
+		if (eyes == NULL || !eyes->supported.eye_gaze) {
+			*out_xspace = NULL;
+			return XR_SUCCESS;
+		}
+
+		xrt_result_t xret = xrt_space_overseer_create_pose_space( //
+		    sys->xso,                                             //
+		    eyes,                                                 //
+		    XRT_INPUT_GENERIC_EYE_GAZE_POSE,                      //
+		    &sess->gaze.xs);                                      //
+		OXR_CHECK_XRET(log, sess, xret, xrt_space_overseer_create_pose_space);
+
+		// Drivers that only run their cameras on demand start them here.
+		xrt_system_devices_feature_inc(sys->xsysd, XRT_DEVICE_FEATURE_EYE_TRACKING);
+		sess->gaze.feature_held = true;
+	}
+
+	*out_xspace = sess->gaze.xs;
+
+	return XR_SUCCESS;
+}
+
+/*!
+ * Gaze orientation relative to the view (head) space, false when the
+ * system has no gaze or it is not currently tracked.
+ */
+static bool
+get_tracked_gaze_in_head(struct oxr_logger *log,
+                         struct oxr_session *sess,
+                         int64_t at_timestamp_ns,
+                         struct xrt_quat *out_gaze)
+{
+	struct xrt_space_overseer *xso = sess->sys->xso;
+	struct xrt_space *gaze_xs = NULL;
+
+	if (xso->semantic.view == NULL) {
+		return false;
+	}
+	if (oxr_session_get_gaze_space(log, sess, &gaze_xs) != XR_SUCCESS || gaze_xs == NULL) {
+		return false;
+	}
+
+	const struct xrt_pose identity = XRT_POSE_IDENTITY;
+	struct xrt_space_relation relation = XRT_SPACE_RELATION_ZERO;
+	xrt_result_t xret = xrt_space_overseer_locate_space( //
+	    xso,                                             //
+	    xso->semantic.view,                              //
+	    &identity,                                       //
+	    at_timestamp_ns,                                 //
+	    gaze_xs,                                         //
+	    &identity,                                       //
+	    &relation);                                      //
+
+	const enum xrt_space_relation_flags needed =
+	    XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT;
+	if (xret != XRT_SUCCESS || (relation.relation_flags & needed) != needed) {
+		return false;
+	}
+
+	*out_gaze = relation.pose.orientation;
+
+	return true;
+}
+
+
+/*
+ *
  * Locate views helpers.
  *
  */
+
+/*!
+ * Project the gaze direction onto the view's tangent plane (+x right, +y up).
+ * Leaves @p out_tan untouched when the gaze points away from the view.
+ */
+static void
+project_gaze_into_view(const struct xrt_quat *gaze_in_head,
+                       const struct xrt_pose *view_in_head,
+                       struct xrt_vec2 *out_tan)
+{
+	const struct xrt_vec3 forward = {0.0f, 0.0f, -1.0f};
+	struct xrt_vec3 dir_head;
+	struct xrt_vec3 dir_view;
+	struct xrt_quat view_inv;
+
+	math_quat_rotate_vec3(gaze_in_head, &forward, &dir_head);
+	math_quat_invert(&view_in_head->orientation, &view_inv);
+	math_quat_rotate_vec3(&view_inv, &dir_head, &dir_view);
+
+	if (dir_view.z >= -1e-4f) {
+		return;
+	}
+
+	out_tan->x = dir_view.x / -dir_view.z;
+	out_tan->y = dir_view.y / -dir_view.z;
+}
+
+/*!
+ * Fov of an inset covering @p fraction of the context view's tangent extent,
+ * centred on @p centre_tan but kept inside the context fov.
+ */
+static struct xrt_fov
+compute_inset_fov(const struct xrt_fov *context, struct xrt_vec2 centre_tan, float fraction)
+{
+	const float tl = tanf(context->angle_left);
+	const float tr = tanf(context->angle_right);
+	const float td = tanf(context->angle_down);
+	const float tu = tanf(context->angle_up);
+
+	const float half_w = (tr - tl) * fraction * 0.5f;
+	const float half_h = (tu - td) * fraction * 0.5f;
+
+	const float cx = fminf(fmaxf(centre_tan.x, tl + half_w), tr - half_w);
+	const float cy = fminf(fmaxf(centre_tan.y, td + half_h), tu - half_h);
+
+	return (struct xrt_fov){
+	    .angle_left = atanf(cx - half_w),
+	    .angle_right = atanf(cx + half_w),
+	    .angle_up = atanf(cy + half_h),
+	    .angle_down = atanf(cy - half_h),
+	};
+}
 
 struct locate_views_data
 {
@@ -256,6 +387,7 @@ get_device_fovs_and_poses(struct oxr_logger *log,
                           struct xrt_device *xdev,
                           int64_t xdisplay_time_ns,
                           uint32_t view_count,
+                          const struct xrt_quat *gaze_in_head,
                           struct xrt_space_relation *out_T_xdev_head,
                           struct locate_views_data *out_data)
 {
@@ -316,20 +448,18 @@ get_device_fovs_and_poses(struct oxr_logger *log,
 	OXR_CHECK_XRET(log, sess, xret, xrt_device_get_view_poses);
 
 	// Generate inset views (views 2-3) from context views (views 0-1) for quad view configuration.
-	// Each inset view uses the same pose as its corresponding context view but with half the FOV.
+	// Each inset view shares its context view's pose, with a smaller fov centred on the gaze if given.
 	for (uint32_t i = 2; i < view_count; i++) {
 		const uint32_t src_index = i - 2;
-		struct xrt_fov src_fov = out_data->fovs[src_index];
-		struct xrt_pose src_pose = out_data->poses[src_index];
+		struct xrt_vec2 centre_tan = {0.0f, 0.0f};
 
-		out_data->fovs[i] = (struct xrt_fov){
-		    .angle_left = src_fov.angle_left / 2,
-		    .angle_right = src_fov.angle_right / 2,
-		    .angle_up = src_fov.angle_up / 2,
-		    .angle_down = src_fov.angle_down / 2,
-		};
+		if (gaze_in_head != NULL) {
+			project_gaze_into_view(gaze_in_head, &out_data->poses[src_index], &centre_tan);
+		}
 
-		out_data->poses[i] = src_pose;
+		out_data->fovs[i] =
+		    compute_inset_fov(&out_data->fovs[src_index], centre_tan, sess->gaze.inset_fraction);
+		out_data->poses[i] = out_data->poses[src_index];
 	}
 
 	return XR_SUCCESS;
@@ -874,19 +1004,34 @@ oxr_session_locate_views(struct oxr_logger *log,
 	const uint64_t xdisplay_time =
 	    time_state_ts_to_monotonic_ns(sess->sys->inst->timekeeping, viewLocateInfo->displayTime);
 
+	// Gaze relative to the head, only when the app asked for gaze-following insets.
+	struct xrt_quat gaze_in_head = XRT_QUAT_IDENTITY;
+	bool gaze_tracked = false;
+#ifdef OXR_HAVE_VARJO_foveated_rendering
+	if (view_count == 4 && !xdev->supported.get_views_quad &&
+	    sess->sys->inst->extensions.VARJO_foveated_rendering) {
+		const XrViewLocateFoveatedRenderingVARJO *foveated = OXR_GET_INPUT_FROM_CHAIN(
+		    viewLocateInfo, XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO, XrViewLocateFoveatedRenderingVARJO);
+		if (foveated != NULL && foveated->foveatedRenderingActive) {
+			gaze_tracked = get_tracked_gaze_in_head(log, sess, xdisplay_time, &gaze_in_head);
+		}
+	}
+#endif
+
 	// The head pose as in the xdev's space, aka XRT_INPUT_GENERIC_HEAD_POSE.
 	struct xrt_space_relation T_xdev_head = XRT_SPACE_RELATION_ZERO;
 
 	// Data including fovs and poses.
 	struct locate_views_data data = {0};
-	ret = get_device_fovs_and_poses( //
-	    log,                         //
-	    sess,                        //
-	    xdev,                        //
-	    xdisplay_time,               //
-	    view_count,                  //
-	    &T_xdev_head,                //
-	    &data);                      //
+	ret = get_device_fovs_and_poses(         //
+	    log,                                 //
+	    sess,                                //
+	    xdev,                                //
+	    xdisplay_time,                       //
+	    view_count,                          //
+	    gaze_tracked ? &gaze_in_head : NULL, //
+	    &T_xdev_head,                        //
+	    &data);                              //
 	if (ret != XR_SUCCESS) {
 		if (print) {
 			oxr_slog(&slog, "\n\tReturning invalid poses");
@@ -1225,6 +1370,12 @@ oxr_session_destroy(struct oxr_logger *log, struct oxr_handle_base *hb)
 	oxr_session_action_context_fini(&sess->action_context);
 	oxr_session_attached_actions_fini(&sess->attached_actions);
 
+	if (sess->gaze.feature_held) {
+		xrt_system_devices_feature_dec(sess->sys->xsysd, XRT_DEVICE_FEATURE_EYE_TRACKING);
+		sess->gaze.feature_held = false;
+	}
+	xrt_space_reference(&sess->gaze.xs, NULL);
+
 	xrt_comp_destroy(&sess->compositor);
 	xrt_comp_native_destroy(&sess->xcn);
 	xrt_session_destroy(&sess->xs);
@@ -1279,6 +1430,13 @@ oxr_session_allocate_and_init(struct oxr_logger *log,
 	sess->ipd_meters = debug_get_num_option_ipd() / 1000.0f;
 	sess->frame_timing_spew = debug_get_bool_option_frame_timing_spew();
 	sess->frame_timing_wait_sleep_ms = debug_get_num_option_wait_frame_sleep();
+
+	float inset_fraction = debug_get_float_option_foveated_inset_fraction();
+	if (!(inset_fraction > 0.0f && inset_fraction <= 1.0f)) {
+		oxr_warn(log, "OXR_FOVEATED_INSET_FRACTION must be in (0, 1], using 0.5");
+		inset_fraction = 0.5f;
+	}
+	sess->gaze.inset_fraction = inset_fraction;
 
 	// This is set to something valid in begin session, used in xrEndFrame.
 	sess->current_view_config_type = XR_VIEW_CONFIGURATION_TYPE_MAX_ENUM;
