@@ -94,10 +94,29 @@ full-resolution region (`BIGEYE_DEMO_FOV_DEG`, default 38) following the
 gaze, with fixed reference dots, to judge the result. With a per-user model,
 calibration and a recenter, the 14 targets validate within about 2 degrees.
 
+## Foveated rendering
+
+Applications that enable `XR_VARJO_quad_views` and
+`XR_VARJO_foveated_rendering` and pass `foveatedRenderingActive` to
+`xrLocateViews` get inset views (2 and 3) centred on the gaze, clamped to
+stay inside the context views. Without a tracked gaze the inset stays in the
+centre. `XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO` located against `VIEW`
+gives the same gaze, which is how such applications check availability. The
+cameras run for the lifetime of any session that used either.
+
+`bigeye_calibration quadviews` renders four projection views this way, with
+the inset views tinted, a red dot at the combined-eye gaze and the fixed
+reference dots, so the steered region can be judged in the headset. It
+prints the inset fov centres next to the gaze; `BIGEYE_QUAD_FOVEATED=0` runs
+the same with foveation off for comparison.
+
 ## Environment variables
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `OXR_FOVEATED_INSET_FRACTION` | 0.5 | inset extent as a fraction of the context view's tangent range |
+| `OXR_FOVEATED_CONTEXT_SCALE_PERCENTAGE` | 60 | recommended context view size while foveation is active |
+| `XRT_COMPOSITOR_INSET_BLEND_EDGE` | 0.15 | fraction of the inset faded into the context at each edge (compositor, 0 to 0.5) |
 | `BIGEYE_EYE_MODEL` | `~/.config/monado/bigeye_model.onnx` | ONNX model path |
 | `BIGEYE_LOG` | info | log level |
 | `BIGEYE_CROP_SIZE`, `BIGEYE_CROP_A_X`, `BIGEYE_CROP_B_X`, `BIGEYE_CROP_Y` | 350, 0, 50, 0 | per-eye crop, offsets into each 400 px half |

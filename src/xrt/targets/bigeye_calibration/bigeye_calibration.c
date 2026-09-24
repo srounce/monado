@@ -10,10 +10,13 @@
 //   bigeye_calibration record F   smooth pursuit labels for bigeye_train.py
 //   bigeye_calibration follow     a square the size of the foveated region
 //                                 tracks the reported gaze
+//   bigeye_calibration quadviews  renders four views through XR_VARJO_quad_views
+//                                 with XR_VARJO_foveated_rendering so the tinted
+//                                 inset views follow the gaze
 //
-// Rendering uses XR_KHR_vulkan_enable2. Every element is a quad composition
-// layer whose swapchain image is cleared to one colour by a render pass, so
-// there is no pipeline, vertex data or shader.
+// Rendering uses XR_KHR_vulkan_enable2. Every element is a composition layer
+// whose swapchain image is cleared to one colour by a render pass, so there is
+// no pipeline, vertex data or shader.
 
 #include <math.h>
 #include <stdbool.h>
@@ -318,15 +321,19 @@ struct solid_swapchain
 };
 
 static void
-solid_swapchain_init(
-    XrSession session, struct vk_state *vk, uint32_t size, const float color[4], struct solid_swapchain *out)
+solid_swapchain_init(XrSession session,
+                     struct vk_state *vk,
+                     uint32_t width,
+                     uint32_t height,
+                     const float color[4],
+                     struct solid_swapchain *out)
 {
 	XrSwapchainCreateInfo scci = {.type = XR_TYPE_SWAPCHAIN_CREATE_INFO,
 	                              .usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT,
 	                              .format = vk->format,
 	                              .sampleCount = 1,
-	                              .width = size,
-	                              .height = size,
+	                              .width = width,
+	                              .height = height,
 	                              .faceCount = 1,
 	                              .arraySize = 1,
 	                              .mipCount = 1};
@@ -355,8 +362,8 @@ solid_swapchain_init(
 		                               .renderPass = vk->render_pass,
 		                               .attachmentCount = 1,
 		                               .pAttachments = &view,
-		                               .width = size,
-		                               .height = size,
+		                               .width = width,
+		                               .height = height,
 		                               .layers = 1};
 		VkFramebuffer fb;
 		VK(vkCreateFramebuffer(vk->device, &fci, NULL, &fb));
@@ -373,7 +380,7 @@ solid_swapchain_init(
 		VkRenderPassBeginInfo rbi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 		                             .renderPass = vk->render_pass,
 		                             .framebuffer = fb,
-		                             .renderArea = {.extent = {size, size}},
+		                             .renderArea = {.extent = {width, height}},
 		                             .clearValueCount = 1,
 		                             .pClearValues = &clear};
 		vkCmdBeginRenderPass(out->cmds[i], &rbi, VK_SUBPASS_CONTENTS_INLINE);
@@ -400,24 +407,203 @@ solid_swapchain_present(struct vk_state *vk, struct solid_swapchain *sc)
 	CK(xrReleaseSwapchainImage(sc->swapchain, NULL));
 }
 
+/*
+ *
+ * Quad views mode: four projection views, the insets tinted so the region the
+ * runtime steers with the gaze is visible. A red dot marks the gaze reported
+ * through XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO and light dots sit at
+ * fixed angles for reference. BIGEYE_QUAD_FOVEATED=0 leaves foveation off to
+ * compare against the centred insets.
+ *
+ */
+
+static void
+fov_centre_deg(XrFovf f, double *out_yaw, double *out_pitch)
+{
+	*out_yaw = DEG(atan((tan(f.angleLeft) + tan(f.angleRight)) / 2.0));
+	*out_pitch = DEG(atan((tan(f.angleUp) + tan(f.angleDown)) / 2.0));
+}
+
+static int
+run_quadviews(XrInstance instance,
+              XrSystemId system_id,
+              XrSession session,
+              struct vk_state *vk,
+              XrSpace view_space,
+              struct solid_swapchain *dot_sc,
+              struct solid_swapchain *ref_sc)
+{
+	const XrViewConfigurationType vct = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO;
+	const char *fov_env = getenv("BIGEYE_QUAD_FOVEATED");
+	const bool foveated = fov_env == NULL || atoi(fov_env) != 0;
+	const char *secs_env = getenv("BIGEYE_DEMO_SECONDS");
+	const double seconds = secs_env != NULL ? atof(secs_env) : 60.0;
+	static const struct target refs[] = {{0, 0}, {15, 0}, {-15, 0}, {0, 8}, {0, -8}};
+
+	// Sizes as recommended for foveated use: smaller context, full-size inset.
+	XrFoveatedViewConfigurationViewVARJO fvcv[4];
+	XrViewConfigurationView vcv[4];
+	for (int i = 0; i < 4; i++) {
+		fvcv[i] = (XrFoveatedViewConfigurationViewVARJO){.type = XR_TYPE_FOVEATED_VIEW_CONFIGURATION_VIEW_VARJO,
+		                                                 .foveatedRenderingActive = foveated};
+		vcv[i] = (XrViewConfigurationView){.type = XR_TYPE_VIEW_CONFIGURATION_VIEW, .next = &fvcv[i]};
+	}
+	uint32_t view_count = 0;
+	CK(xrEnumerateViewConfigurationViews(instance, system_id, vct, 4, &view_count, vcv));
+	if (view_count != 4) {
+		fprintf(stderr, "Expected 4 views, got %u\n", view_count);
+		return 1;
+	}
+
+	// Context views mid grey, inset views a lighter warm tint.
+	const float context_color[4] = {srgb_to_linear(0.35f), srgb_to_linear(0.35f), srgb_to_linear(0.35f), 1.0f};
+	const float inset_color[4] = {srgb_to_linear(0.55f), srgb_to_linear(0.50f), srgb_to_linear(0.40f), 1.0f};
+	struct solid_swapchain view_sc[4];
+	for (uint32_t i = 0; i < 4; i++) {
+		printf("view %u: %ux%u\n", i, vcv[i].recommendedImageRectWidth, vcv[i].recommendedImageRectHeight);
+		solid_swapchain_init(session, vk, vcv[i].recommendedImageRectWidth, vcv[i].recommendedImageRectHeight,
+		                     i < 2 ? context_color : inset_color, &view_sc[i]);
+	}
+
+	XrReferenceSpaceCreateInfo rsci = {.type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO,
+	                                   .referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL,
+	                                   .poseInReferenceSpace = {.orientation = {.w = 1}}};
+	XrSpace local_space;
+	CK(xrCreateReferenceSpace(session, &rsci, &local_space));
+	rsci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO;
+	XrSpace eye_space;
+	CK(xrCreateReferenceSpace(session, &rsci, &eye_space));
+
+	printf("Quad views mode: foveation %s, %.0f s. Reference dots at 0, +-15 yaw, +-8 pitch.\n",
+	       foveated ? "on" : "off", seconds);
+
+	XrTime start = 0;
+	int frame = 0;
+	while (true) {
+		XrEventDataBuffer ev = {.type = XR_TYPE_EVENT_DATA_BUFFER};
+		while (xrPollEvent(instance, &ev) == XR_SUCCESS) {
+			ev.type = XR_TYPE_EVENT_DATA_BUFFER;
+		}
+		XrFrameState fs = {.type = XR_TYPE_FRAME_STATE};
+		CK(xrWaitFrame(session, NULL, &fs));
+		CK(xrBeginFrame(session, NULL));
+		if (start == 0) {
+			start = fs.predictedDisplayTime;
+		}
+		if ((double)(fs.predictedDisplayTime - start) > seconds * 1e9) {
+			XrFrameEndInfo fei = {.type = XR_TYPE_FRAME_END_INFO,
+			                      .displayTime = fs.predictedDisplayTime,
+			                      .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
+			CK(xrEndFrame(session, &fei));
+			break;
+		}
+
+		XrViewLocateFoveatedRenderingVARJO vlf = {.type = XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO,
+		                                          .foveatedRenderingActive = foveated};
+		XrViewLocateInfo vli = {.type = XR_TYPE_VIEW_LOCATE_INFO,
+		                        .next = &vlf,
+		                        .viewConfigurationType = vct,
+		                        .displayTime = fs.predictedDisplayTime,
+		                        .space = local_space};
+		XrViewState vs = {.type = XR_TYPE_VIEW_STATE};
+		XrView views[4] = {
+		    {.type = XR_TYPE_VIEW}, {.type = XR_TYPE_VIEW}, {.type = XR_TYPE_VIEW}, {.type = XR_TYPE_VIEW}};
+		uint32_t located = 0;
+		CK(xrLocateViews(session, &vli, &vs, 4, &located, views));
+
+		double gy = 0, gp = 0;
+		bool tracked = false;
+		XrSpaceLocation loc = {.type = XR_TYPE_SPACE_LOCATION};
+		if (XR_SUCCEEDED(xrLocateSpace(eye_space, view_space, fs.predictedDisplayTime, &loc)) &&
+		    (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT)) {
+			gaze_angles_from_quat(loc.pose.orientation, &gy, &gp);
+			tracked = true;
+		}
+		if (frame++ % 45 == 0) {
+			double ly, lp, ry, rp;
+			fov_centre_deg(views[2].fov, &ly, &lp);
+			fov_centre_deg(views[3].fov, &ry, &rp);
+			printf("\rgaze yaw %+6.1f pitch %+6.1f %s inset centres L (%+5.1f %+5.1f) R (%+5.1f %+5.1f)   ",
+			       gy, gp, tracked ? "" : "(not tracked)", ly, lp, ry, rp);
+		}
+
+		solid_swapchain_present(vk, dot_sc);
+		solid_swapchain_present(vk, ref_sc);
+		XrCompositionLayerProjectionView proj_views[4];
+		for (uint32_t i = 0; i < 4; i++) {
+			solid_swapchain_present(vk, &view_sc[i]);
+			proj_views[i] = (XrCompositionLayerProjectionView){
+			    .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW,
+			    .pose = views[i].pose,
+			    .fov = views[i].fov,
+			    .subImage = {.swapchain = view_sc[i].swapchain,
+			                 .imageRect = {.extent = {(int32_t)vcv[i].recommendedImageRectWidth,
+			                                          (int32_t)vcv[i].recommendedImageRectHeight}}},
+			};
+		}
+		XrCompositionLayerProjection proj = {.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION,
+		                                     .space = local_space,
+		                                     .viewCount = 4,
+		                                     .views = proj_views};
+
+		XrCompositionLayerQuad gaze_dot = {
+		    .type = XR_TYPE_COMPOSITION_LAYER_QUAD,
+		    .space = view_space,
+		    .eyeVisibility = XR_EYE_VISIBILITY_BOTH,
+		    .subImage = {.swapchain = dot_sc->swapchain, .imageRect = {.extent = {16, 16}}},
+		    .pose = quad_pose_from_angles(gy, gp),
+		    .size = {0.015f, 0.015f},
+		};
+		XrCompositionLayerQuad ref_quads[5];
+		for (int i = 0; i < 5; i++) {
+			ref_quads[i] = gaze_dot;
+			ref_quads[i].subImage.swapchain = ref_sc->swapchain;
+			ref_quads[i].pose = quad_pose_from_angles(refs[i].yaw_deg, refs[i].pitch_deg);
+		}
+		const XrCompositionLayerBaseHeader *layers[7] = {
+		    (XrCompositionLayerBaseHeader *)&proj,         (XrCompositionLayerBaseHeader *)&ref_quads[0],
+		    (XrCompositionLayerBaseHeader *)&ref_quads[1], (XrCompositionLayerBaseHeader *)&ref_quads[2],
+		    (XrCompositionLayerBaseHeader *)&ref_quads[3], (XrCompositionLayerBaseHeader *)&ref_quads[4],
+		    (XrCompositionLayerBaseHeader *)&gaze_dot,
+		};
+		XrFrameEndInfo fei = {.type = XR_TYPE_FRAME_END_INFO,
+		                      .displayTime = fs.predictedDisplayTime,
+		                      .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE,
+		                      .layerCount = fs.shouldRender ? 7 : 0,
+		                      .layers = layers};
+		CK(xrEndFrame(session, &fei));
+	}
+	printf("\n");
+
+	xrDestroySession(session);
+	xrDestroyInstance(instance);
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
 	bool follow = argc > 1 && strcmp(argv[1], "follow") == 0;
 	bool record = argc > 2 && strcmp(argv[1], "record") == 0;
 	bool recenter = argc > 1 && strcmp(argv[1], "recenter") == 0;
+	bool quadviews = argc > 1 && strcmp(argv[1], "quadviews") == 0;
 	const char *record_path = record ? argv[2] : NULL;
 	setvbuf(stdout, NULL, _IONBF, 0);
 
 	/*
 	 * Instance, system.
 	 */
-	const char *exts[] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, "XR_EXT_eye_gaze_interaction",
-	                      XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME};
+	const char *exts[5] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, "XR_EXT_eye_gaze_interaction",
+	                       XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME};
+	uint32_t ext_count = 3;
+	if (quadviews) {
+		exts[ext_count++] = XR_VARJO_QUAD_VIEWS_EXTENSION_NAME;
+		exts[ext_count++] = XR_VARJO_FOVEATED_RENDERING_EXTENSION_NAME;
+	}
 	XrInstanceCreateInfo ici = {
 	    .type = XR_TYPE_INSTANCE_CREATE_INFO,
 	    .applicationInfo = {.applicationName = "bigeye_calib", .apiVersion = XR_API_VERSION_1_0},
-	    .enabledExtensionCount = 3,
+	    .enabledExtensionCount = ext_count,
 	    .enabledExtensionNames = exts};
 	XrInstance instance;
 	CK(xrCreateInstance(&ici, &instance));
@@ -431,12 +617,18 @@ main(int argc, char **argv)
 	XrSystemId system_id;
 	CK(xrGetSystem(instance, &sgi, &system_id));
 
-	XrSystemEyeGazeInteractionPropertiesEXT gaze_props = {.type =
-	                                                          XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT};
+	XrSystemFoveatedRenderingPropertiesVARJO foveated_props = {
+	    .type = XR_TYPE_SYSTEM_FOVEATED_RENDERING_PROPERTIES_VARJO};
+	XrSystemEyeGazeInteractionPropertiesEXT gaze_props = {
+	    .type = XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT, .next = quadviews ? &foveated_props : NULL};
 	XrSystemProperties props = {.type = XR_TYPE_SYSTEM_PROPERTIES, .next = &gaze_props};
 	CK(xrGetSystemProperties(instance, system_id, &props));
 	if (!gaze_props.supportsEyeGazeInteraction) {
 		fprintf(stderr, "System does not support eye gaze interaction\n");
+		return 1;
+	}
+	if (quadviews && !foveated_props.supportsFoveatedRendering) {
+		fprintf(stderr, "System does not support foveated rendering\n");
 		return 1;
 	}
 
@@ -506,12 +698,12 @@ main(int argc, char **argv)
 	// A small red dot in the middle of the square gives a precise fixation point.
 	const float dot_color[4] = {srgb_to_linear(0.85f), srgb_to_linear(0.12f), srgb_to_linear(0.12f), 1.0f};
 	struct solid_swapchain bg_sc, fg_sc, dot_sc;
-	solid_swapchain_init(session, &vk, 64, bg_color, &bg_sc);
-	solid_swapchain_init(session, &vk, 128, fg_color, &fg_sc);
-	solid_swapchain_init(session, &vk, 16, dot_color, &dot_sc);
+	solid_swapchain_init(session, &vk, 64, 64, bg_color, &bg_sc);
+	solid_swapchain_init(session, &vk, 128, 128, fg_color, &fg_sc);
+	solid_swapchain_init(session, &vk, 16, 16, dot_color, &dot_sc);
 	const float ref_color[4] = {srgb_to_linear(0.9f), srgb_to_linear(0.9f), srgb_to_linear(0.9f), 1.0f};
 	struct solid_swapchain ref_sc;
-	solid_swapchain_init(session, &vk, 16, ref_color, &ref_sc);
+	solid_swapchain_init(session, &vk, 16, 16, ref_color, &ref_sc);
 
 	/*
 	 * Wait for the session to become ready.
@@ -523,15 +715,21 @@ main(int argc, char **argv)
 			if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
 				XrEventDataSessionStateChanged *ssc = (XrEventDataSessionStateChanged *)&ev;
 				if (ssc->state == XR_SESSION_STATE_READY) {
-					XrSessionBeginInfo sbi = {.type = XR_TYPE_SESSION_BEGIN_INFO,
-					                          .primaryViewConfigurationType =
-					                              XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+					XrSessionBeginInfo sbi = {
+					    .type = XR_TYPE_SESSION_BEGIN_INFO,
+					    .primaryViewConfigurationType =
+					        quadviews ? XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO
+					                  : XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
 					CK(xrBeginSession(session, &sbi));
 					running = true;
 				}
 			}
 			ev.type = XR_TYPE_EVENT_DATA_BUFFER;
 		}
+	}
+
+	if (quadviews) {
+		return run_quadviews(instance, system_id, session, &vk, view_space, &dot_sc, &ref_sc);
 	}
 
 	if (!follow && !record && !recenter) {
