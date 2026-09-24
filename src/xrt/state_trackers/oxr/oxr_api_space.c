@@ -70,6 +70,16 @@ is_reference_space_type_valid(struct oxr_logger *log,
 		                 "(%s == XR_REFERENCE_SPACE_TYPE_UNBOUNDED_MSFT) is only valid if "
 		                 "XR_MSFT_unbounded_reference_space is enabled",
 		                 field_name);
+	case XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO:
+#ifdef OXR_HAVE_VARJO_foveated_rendering
+		if (sys->inst->extensions.VARJO_foveated_rendering) {
+			return XR_SUCCESS;
+		}
+#endif
+		return oxr_error(log, XR_ERROR_VALIDATION_FAILURE,
+		                 "(%s == XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO) is only valid if "
+		                 "XR_VARJO_foveated_rendering is enabled",
+		                 field_name);
 	default: break;
 	}
 
