@@ -591,7 +591,7 @@ TEST_CASE("render_layer_spec is a padding-free specialization key", "[aux_render
 	// layer.comp has four specialization constants; the generated POD stores each as a 4-byte field.
 	STATIC_REQUIRE(sizeof(render_layer_spec) == 4u * sizeof(int32_t));
 	// Must match k_inset_blend_edge default in layer.comp.
-	STATIC_REQUIRE(RENDER_LAYER_DEFAULT_INSET_BLEND_EDGE == 0.05f);
+	STATIC_REQUIRE(RENDER_LAYER_DEFAULT_INSET_BLEND_EDGE == 0.15f);
 
 	const render_layer_spec key = make_test_layer_spec(VK_FALSE);
 	CHECK(key.do_timewarp == VK_FALSE);

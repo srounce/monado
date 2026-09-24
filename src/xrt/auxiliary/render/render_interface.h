@@ -105,7 +105,7 @@ extern "C" {
  * Default inset blend edge width for layer projection edge blending.
  * Must match the default in layer.comp (k_inset_blend_edge).
  */
-#define RENDER_LAYER_DEFAULT_INSET_BLEND_EDGE (0.05f)
+#define RENDER_LAYER_DEFAULT_INSET_BLEND_EDGE (0.15f)
 
 /*!
  * The maximum number samplers per view that can be used by the compute shader
