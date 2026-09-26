@@ -41,6 +41,7 @@
 #define IPC_MAX_CLIENTS 32
 #define IPC_MAX_RAW_VIEWS 32 // Max views that we can get, artificial limit.
 #define IPC_EVENT_QUEUE_SIZE 32
+#define IPC_PATH_LEN 512
 
 
 // example: v21.0.0-560-g586d33b5
@@ -352,6 +353,14 @@ struct ipc_client_io_blocks
  *
  * @ingroup ipc
  */
+/*!
+ * A filesystem path passed by value in a message.
+ */
+struct ipc_path
+{
+	char str[IPC_PATH_LEN];
+};
+
 struct ipc_app_state
 {
 	// Stable and unique ID of the client, only unique within this instance.

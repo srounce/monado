@@ -194,6 +194,34 @@ ipc_client_xdev_set_body_tracking_calibration_override_meta(struct xrt_device *x
 }
 
 static xrt_result_t
+ipc_client_xdev_start_eye_tracking_capture(struct xrt_device *xdev, const char *path)
+{
+	struct ipc_client_xdev *icx = ipc_client_xdev(xdev);
+
+	struct ipc_path ipc_path = {0};
+	if (snprintf(ipc_path.str, sizeof(ipc_path.str), "%s", path) >= (int)sizeof(ipc_path.str)) {
+		return XRT_ERROR_INVALID_ARGUMENT;
+	}
+
+	xrt_result_t xret = ipc_call_device_start_eye_tracking_capture( //
+	    icx->ipc_c,                                                  //
+	    icx->device_id,                                              //
+	    &ipc_path);                                                  //
+	IPC_CHK_ALWAYS_RET(icx->ipc_c, xret, "ipc_call_device_start_eye_tracking_capture");
+}
+
+static xrt_result_t
+ipc_client_xdev_stop_eye_tracking_capture(struct xrt_device *xdev)
+{
+	struct ipc_client_xdev *icx = ipc_client_xdev(xdev);
+
+	xrt_result_t xret = ipc_call_device_stop_eye_tracking_capture( //
+	    icx->ipc_c,                                                 //
+	    icx->device_id);                                            //
+	IPC_CHK_ALWAYS_RET(icx->ipc_c, xret, "ipc_call_device_stop_eye_tracking_capture");
+}
+
+static xrt_result_t
 ipc_client_xdev_set_body_tracking_fidelity_meta(struct xrt_device *xdev,
                                                 enum xrt_body_tracking_fidelity_meta new_fidelity)
 {
@@ -482,6 +510,8 @@ ipc_client_xdev_init(struct ipc_client_xdev *icx,
 	icx->base.set_body_tracking_calibration_override_meta =
 	    ipc_client_xdev_set_body_tracking_calibration_override_meta;
 	icx->base.set_body_tracking_fidelity_meta = ipc_client_xdev_set_body_tracking_fidelity_meta;
+	icx->base.start_eye_tracking_capture = ipc_client_xdev_start_eye_tracking_capture;
+	icx->base.stop_eye_tracking_capture = ipc_client_xdev_stop_eye_tracking_capture;
 	icx->base.set_output = ipc_client_xdev_set_output;
 	icx->base.get_output_limits = ipc_client_xdev_get_output_limits;
 	icx->base.get_compositor_info = ipc_client_xdev_get_compositor_info;

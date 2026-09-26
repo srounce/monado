@@ -505,6 +505,23 @@ struct xrt_device
 	xrt_result_t (*set_body_tracking_calibration_override_meta)(struct xrt_device *xdev, float new_body_height);
 
 	/*!
+	 * Start writing eye tracking training data to a file, for tools that
+	 * build per-user gaze models. The file format is defined by the driver
+	 * and matched by its training pipeline. Starting again replaces the file.
+	 *
+	 * @param[in] xdev   The eye tracking device.
+	 * @param[in] path   Absolute path, opened in the driver's process.
+	 */
+	xrt_result_t (*start_eye_tracking_capture)(struct xrt_device *xdev, const char *path);
+
+	/*!
+	 * Stop a capture started with @ref start_eye_tracking_capture.
+	 *
+	 * @param[in] xdev   The eye tracking device.
+	 */
+	xrt_result_t (*stop_eye_tracking_capture)(struct xrt_device *xdev);
+
+	/*!
 	 * @brief XR_META_body_tracking_fidelity - body tracking extension for request changing the tracking fidelity
 	 *
 	 * @param[in] xdev              The body tracking device.
@@ -893,6 +910,38 @@ xrt_device_reset_body_tracking_calibration_meta(struct xrt_device *xdev)
 		return XRT_ERROR_NOT_IMPLEMENTED;
 	}
 	return xdev->reset_body_tracking_calibration_meta(xdev);
+}
+
+/*!
+ * Helper function for @ref xrt_device::start_eye_tracking_capture.
+ *
+ * @copydoc xrt_device::start_eye_tracking_capture
+ *
+ * @public @memberof xrt_device
+ */
+XRT_NONNULL_ALL static inline xrt_result_t
+xrt_device_start_eye_tracking_capture(struct xrt_device *xdev, const char *path)
+{
+	if (xdev->start_eye_tracking_capture == NULL) {
+		return XRT_ERROR_NOT_IMPLEMENTED;
+	}
+	return xdev->start_eye_tracking_capture(xdev, path);
+}
+
+/*!
+ * Helper function for @ref xrt_device::stop_eye_tracking_capture.
+ *
+ * @copydoc xrt_device::stop_eye_tracking_capture
+ *
+ * @public @memberof xrt_device
+ */
+XRT_NONNULL_ALL static inline xrt_result_t
+xrt_device_stop_eye_tracking_capture(struct xrt_device *xdev)
+{
+	if (xdev->stop_eye_tracking_capture == NULL) {
+		return XRT_ERROR_NOT_IMPLEMENTED;
+	}
+	return xdev->stop_eye_tracking_capture(xdev);
 }
 
 /*!

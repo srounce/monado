@@ -235,6 +235,19 @@
 		]
 	},
 
+	"device_start_eye_tracking_capture": {
+		"in": [
+			{"name": "id", "type": "uint32_t"},
+			{"name": "path", "type": "struct ipc_path"}
+		]
+	},
+
+	"device_stop_eye_tracking_capture": {
+		"in": [
+			{"name": "id", "type": "uint32_t"}
+		]
+	},
+
 	"device_set_body_tracking_fidelity_meta": {
 		"in": [
 			{"name": "id", "type": "uint32_t"},

@@ -36,6 +36,8 @@ typedef enum op_mode
 	MODE_RECENTER,
 	MODE_GET_BRIGHTNESS,
 	MODE_SET_BRIGHTNESS,
+	MODE_START_EYE_CAPTURE,
+	MODE_STOP_EYE_CAPTURE,
 } op_mode_t;
 
 
@@ -307,7 +309,62 @@ enum LongOptions
 	OPTION_DEVICE = 1,
 	OPTION_GET_BRIGHTNESS,
 	OPTION_SET_BRIGHTNESS,
+	OPTION_START_EYE_CAPTURE,
+	OPTION_STOP_EYE_CAPTURE,
 };
+
+static int
+get_eye_tracker_id(struct ipc_connection *ipc_c, int device_id)
+{
+	if (device_id >= 0) {
+		return device_id;
+	}
+	int32_t eyes = ipc_c->ism->roles.eyes;
+	if (eyes < 0) {
+		PE("No eye tracker device, pass --device <id>\n");
+	}
+	return eyes;
+}
+
+int
+start_eye_capture(struct ipc_connection *ipc_c, int device_id, const char *path)
+{
+	device_id = get_eye_tracker_id(ipc_c, device_id);
+	if (device_id < 0) {
+		return 1;
+	}
+
+	struct ipc_path ipc_path = {0};
+	if (snprintf(ipc_path.str, sizeof(ipc_path.str), "%s", path) >= (int)sizeof(ipc_path.str)) {
+		PE("Path too long\n");
+		return 1;
+	}
+
+	xrt_result_t r = ipc_call_device_start_eye_tracking_capture(ipc_c, device_id, &ipc_path);
+	if (r != XRT_SUCCESS) {
+		PE("Failed to start eye tracking capture on device %d (%d)\n", device_id, r);
+		return 1;
+	}
+
+	return 0;
+}
+
+int
+stop_eye_capture(struct ipc_connection *ipc_c, int device_id)
+{
+	device_id = get_eye_tracker_id(ipc_c, device_id);
+	if (device_id < 0) {
+		return 1;
+	}
+
+	xrt_result_t r = ipc_call_device_stop_eye_tracking_capture(ipc_c, device_id);
+	if (r != XRT_SUCCESS) {
+		PE("Failed to stop eye tracking capture on device %d (%d)\n", device_id, r);
+		return 1;
+	}
+
+	return 0;
+}
 
 int
 main(int argc, char *argv[])
@@ -319,11 +376,14 @@ main(int argc, char *argv[])
 	int s_val = 0;
 	int device_val = -1;
 	char *brightness;
+	char *capture_path = NULL;
 
 	static struct option long_options[] = {
 	    {"device", required_argument, NULL, OPTION_DEVICE},
 	    {"get-brightness", no_argument, NULL, OPTION_GET_BRIGHTNESS},
 	    {"set-brightness", required_argument, NULL, OPTION_SET_BRIGHTNESS},
+	    {"start-eye-capture", required_argument, NULL, OPTION_START_EYE_CAPTURE},
+	    {"stop-eye-capture", no_argument, NULL, OPTION_STOP_EYE_CAPTURE},
 	    {NULL, 0, NULL, 0},
 	};
 
@@ -357,6 +417,15 @@ main(int argc, char *argv[])
 			op_mode = MODE_SET_BRIGHTNESS;
 			break;
 		}
+		case OPTION_START_EYE_CAPTURE: {
+			capture_path = optarg;
+			op_mode = MODE_START_EYE_CAPTURE;
+			break;
+		}
+		case OPTION_STOP_EYE_CAPTURE: {
+			op_mode = MODE_STOP_EYE_CAPTURE;
+			break;
+		}
 		case '?':
 			if (optopt == 's') {
 				PE("Option -s requires an id to set.\n");
@@ -370,6 +439,9 @@ main(int argc, char *argv[])
 				   "primary device\n");
 				PE("    --get-brightness: Get current display brightness in percent\n");
 				PE("    --set-brightness <[+-]brightness[%%]>: Set display brightness\n");
+				PE("    --start-eye-capture <path>: Write eye tracking training data to path "
+				   "(--device defaults to the eye tracker)\n");
+				PE("    --stop-eye-capture: Stop writing eye tracking training data\n");
 			} else {
 				PE("Option `\\x%x' unknown.\n", optopt);
 			}
@@ -414,6 +486,8 @@ main(int argc, char *argv[])
 	case MODE_RECENTER: exit(recenter_local_spaces(&ipc_c)); break;
 	case MODE_GET_BRIGHTNESS: exit(get_brightness(&ipc_c, device_val)); break;
 	case MODE_SET_BRIGHTNESS: exit(set_brightness(&ipc_c, device_val, brightness)); break;
+	case MODE_START_EYE_CAPTURE: exit(start_eye_capture(&ipc_c, device_val, capture_path)); break;
+	case MODE_STOP_EYE_CAPTURE: exit(stop_eye_capture(&ipc_c, device_val)); break;
 	default: P("Unrecognised operation mode.\n"); exit(1);
 	}
 

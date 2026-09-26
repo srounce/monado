@@ -951,6 +951,44 @@ mnd_root_set_device_brightness(mnd_root_t *root, uint32_t device_index, float br
 }
 
 mnd_result_t
+mnd_root_start_eye_tracking_capture(mnd_root_t *root, uint32_t device_index, const char *path)
+{
+	CHECK_NOT_NULL(root);
+	CHECK_NOT_NULL(path);
+	CHECK_DEVICE_INDEX(device_index);
+
+	struct ipc_path ipc_path = {0};
+	if (snprintf(ipc_path.str, sizeof(ipc_path.str), "%s", path) >= (int)sizeof(ipc_path.str)) {
+		PE("Capture path too long\n");
+		return MND_ERROR_INVALID_VALUE;
+	}
+
+	xrt_result_t xret = ipc_call_device_start_eye_tracking_capture(&root->ipc_c, device_index, &ipc_path);
+	switch (xret) {
+	case XRT_SUCCESS: return MND_SUCCESS;
+	case XRT_ERROR_NOT_IMPLEMENTED: return MND_ERROR_UNSUPPORTED_OPERATION;
+	case XRT_ERROR_INVALID_ARGUMENT: return MND_ERROR_INVALID_VALUE;
+	case XRT_ERROR_IPC_FAILURE: PE("Connection error!"); return MND_ERROR_OPERATION_FAILED;
+	default: return MND_ERROR_OPERATION_FAILED;
+	}
+}
+
+mnd_result_t
+mnd_root_stop_eye_tracking_capture(mnd_root_t *root, uint32_t device_index)
+{
+	CHECK_NOT_NULL(root);
+	CHECK_DEVICE_INDEX(device_index);
+
+	xrt_result_t xret = ipc_call_device_stop_eye_tracking_capture(&root->ipc_c, device_index);
+	switch (xret) {
+	case XRT_SUCCESS: return MND_SUCCESS;
+	case XRT_ERROR_NOT_IMPLEMENTED: return MND_ERROR_UNSUPPORTED_OPERATION;
+	case XRT_ERROR_IPC_FAILURE: PE("Connection error!"); return MND_ERROR_OPERATION_FAILED;
+	default: return MND_ERROR_OPERATION_FAILED;
+	}
+}
+
+mnd_result_t
 mnd_root_set_chroma_key_params(
     mnd_root_t *root, struct mnd_colour_hsv hsv_min, struct mnd_colour_hsv hsv_max, float curve, float despill)
 {

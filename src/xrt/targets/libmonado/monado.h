@@ -734,6 +734,33 @@ mnd_result_t
 mnd_root_set_device_brightness(mnd_root_t *root, uint32_t device_index, float brightness, bool relative);
 
 /*!
+ * Start writing eye tracking training data to a file, for building per-user
+ * gaze models. The format is defined by the driver and read by its training
+ * tool. Starting again replaces the file.
+ *
+ * @param root          The libmonado state.
+ * @param device_index  Index of the eye tracking device.
+ * @param path          Absolute path; the service opens it, so it must be
+ *                      writable from that process.
+ *
+ * @return MND_SUCCESS on success, MND_ERROR_UNSUPPORTED_OPERATION if the device
+ *         cannot capture, MND_ERROR_INVALID_VALUE if the path could not be opened.
+ */
+mnd_result_t
+mnd_root_start_eye_tracking_capture(mnd_root_t *root, uint32_t device_index, const char *path);
+
+/*!
+ * Stop a capture started with @ref mnd_root_start_eye_tracking_capture.
+ *
+ * @param root          The libmonado state.
+ * @param device_index  Index of the eye tracking device.
+ *
+ * @return MND_SUCCESS on success
+ */
+mnd_result_t
+mnd_root_stop_eye_tracking_capture(mnd_root_t *root, uint32_t device_index);
+
+/*!
  * Set the chroma key parameters to be applied to the base application (if there is any).
  *
  * HSV values are in [0, 1] range. Hue wrapping is supported (min > max spans across 0).

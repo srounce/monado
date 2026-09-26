@@ -2565,6 +2565,29 @@ ipc_handle_device_set_body_tracking_calibration_override_meta(volatile struct ip
 }
 
 xrt_result_t
+ipc_handle_device_start_eye_tracking_capture(volatile struct ipc_client_state *ics,
+                                             uint32_t id,
+                                             const struct ipc_path *path)
+{
+	struct xrt_device *xdev = NULL;
+	GET_XDEV_OR_RETURN(ics, id, xdev);
+
+	// Filled in by the client, so never assume termination.
+	struct ipc_path copy = *path;
+	copy.str[sizeof(copy.str) - 1] = '\0';
+
+	return xrt_device_start_eye_tracking_capture(xdev, copy.str);
+}
+
+xrt_result_t
+ipc_handle_device_stop_eye_tracking_capture(volatile struct ipc_client_state *ics, uint32_t id)
+{
+	struct xrt_device *xdev = NULL;
+	GET_XDEV_OR_RETURN(ics, id, xdev);
+	return xrt_device_stop_eye_tracking_capture(xdev);
+}
+
+xrt_result_t
 ipc_handle_device_set_body_tracking_fidelity_meta(volatile struct ipc_client_state *ics,
                                                   uint32_t id,
                                                   enum xrt_body_tracking_fidelity_meta new_fidelity)
