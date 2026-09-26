@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: BSL-1.0
 """Train a per-user gaze model for the Monado bigeye driver.
 
-Inputs are a BIGEYE_CAPTURE stream from the driver (int64 timestamp followed
+Inputs are the driver's eye tracking capture stream (int64 timestamp followed
 by the two 128x128 preprocessed eye images, per frame) and the label log from
 `bigeye_calibration record` (timestamp, target yaw, pitch, eyes-closed flag).
 Frames are joined to labels by nearest timestamp, stacked with the three
@@ -12,10 +12,12 @@ net per eye is trained from scratch. The export matches the driver's layout:
 input [1, 8, 128, 128], output [1, 6] = pitch, yaw, closedness per eye in
 0..1 with angles as (deg + 45) / 90.
 
-    bigeye_train.py capture.bin labels.txt [out.onnx] [--epochs N]
+    bigeye_train.py capture.bin labels.txt [capture2.bin labels2.txt ...] [out.onnx] [--epochs N]
 
-The output defaults to the path the driver loads without configuration,
-$XDG_CONFIG_HOME/monado/bigeye_model.onnx.
+Record several sessions, taking the headset off and reseating it in between,
+and pass them all: a model from a single wearing is offset by several degrees
+at the next. The output defaults to the path the driver loads without
+configuration, $XDG_CONFIG_HOME/monado/bigeye_model.onnx.
 """
 import argparse
 import os
@@ -172,20 +174,35 @@ def evaluate(net, imgs, frames, targets, closed, eye, device):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("capture")
-    ap.add_argument("labels")
-    ap.add_argument("out", nargs="?", default=os.path.join(
-        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "monado", "bigeye_model.onnx"))
+    ap.add_argument("files", nargs="+", metavar="capture.bin labels.txt",
+                    help="one or more capture/label pairs, optionally followed by the output .onnx")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--offset-ns", type=int, default=None,
                     help="add to label timestamps before joining (auto if clocks do not overlap)")
     args = ap.parse_args()
+    args.out = os.path.join(
+        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "monado", "bigeye_model.onnx")
+    if len(args.files) % 2 == 1:
+        args.out = args.files.pop()
+    pairs = list(zip(args.files[0::2], args.files[1::2]))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device {device}")
 
-    ts, imgs = load_capture(args.capture)
-    frames, yaw, pitch, closed = build_samples(ts, imgs, *load_labels(args.labels), args.offset_ns)
+    # A model from one wearing carries a several-degree offset at the next, so
+    # sessions from different seatings are pooled into one training set.
+    all_imgs, all_frames, yaws, pitches, closeds = [], [], [], [], []
+    offset = 0
+    for capture, labels in pairs:
+        ts, imgs = load_capture(capture)
+        frames, yaw, pitch, closed = build_samples(ts, imgs, *load_labels(labels), args.offset_ns)
+        all_imgs.append(imgs)
+        all_frames.append(frames + offset)
+        yaws.append(yaw); pitches.append(pitch); closeds.append(closed)
+        offset += len(imgs)
+    imgs = np.concatenate(all_imgs)
+    frames = np.concatenate(all_frames)
+    yaw, pitch, closed = np.concatenate(yaws), np.concatenate(pitches), np.concatenate(closeds)
     if len(frames) < 500:
         sys.exit("too few joined samples")
 
@@ -206,7 +223,6 @@ def main():
                       opset_version=17, dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}})
     # The exporter may leave weights in a sidecar; fold them into one file.
     import onnx
-    import os
     model = onnx.load(args.out, load_external_data=True)
     onnx.save(model, args.out, save_as_external_data=False)
     sidecar = args.out + ".data"

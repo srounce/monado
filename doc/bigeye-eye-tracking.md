@@ -75,6 +75,28 @@ ONNX file in the driver's layout at the default model path, so the driver
 picks it up on the next start with no configuration. Training errors around
 1 degree on both axes are typical.
 
+A model from a single wearing is only good for that wearing: at the next
+seating the pitch reads 8 to 12 degrees off and blinks are misjudged, while
+the same net trained on two seatings scores about 1 degree on both. So keep
+every session and train on all of them. Record one session per wearing,
+taking the headset off and reseating it in between, into a directory that
+outlives the run:
+
+    D=~/.local/share/monado/bigeye-sessions
+    bigeye_calibration record $D/$(date +%F)-a.txt
+    # reseat
+    bigeye_calibration record $D/$(date +%F)-b.txt
+
+Each session is about 400 MB. Pairs are positional, capture then labels, any
+number of them, with an optional trailing output path, so the whole
+directory trains with
+
+    bigeye_train.py $(for t in $D/*.txt; do echo ${t%.txt}.bin $t; done)
+
+Restart the service to load the new model, then calibrate once for the
+current wearing as described below. Add a session whenever the gaze is off
+after a reseat, and retrain on everything.
+
 ## Calibration and recentering
 
 Even a per-user model has a small residual mapping error and the headset
