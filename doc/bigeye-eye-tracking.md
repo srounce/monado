@@ -54,18 +54,20 @@ signal. The intended path is a model trained on your own eyes, below.
 
 ## Training a per-user model
 
-Two minutes of data are enough. With the service running and
-`BIGEYE_CAPTURE=/path/capture.bin` set, run
+Two minutes of data are enough. With the service running,
 
     bigeye_calibration record /path/labels.txt
 
 Follow the red dot as it drifts around for 120 s, then keep your eyes closed
-for the last 15 s after it disappears. The driver writes every preprocessed
-frame pair with its `CLOCK_MONOTONIC` timestamp to the capture file while
-gaze is in use; the tool logs the target angles with the same clock via
-`XR_KHR_convert_timespec_time`. Then
+for the last 15 s after it disappears. The tool asks the driver over
+libmonado to write every preprocessed frame pair with its `CLOCK_MONOTONIC`
+timestamp to `/path/labels.bin` (a third argument names it otherwise) and
+logs the target angles with the same clock via `XR_KHR_convert_timespec_time`.
+The same capture can be started from a shell with `monado-ctl
+--start-eye-capture <path>` and ended with `--stop-eye-capture`; the driver
+also ends it when the last eye tracking client disconnects. Then
 
-    bigeye_train.py /path/capture.bin /path/labels.txt
+    bigeye_train.py /path/labels.bin /path/labels.txt
 
 trains one small convolutional net per eye from scratch (PyTorch, about a
 minute on a GPU, needs `numpy torch onnx onnxscript`) and exports a single
@@ -124,7 +126,6 @@ the same with foveation off for comparison.
 | `BIGEYE_FILTER_FCMIN`, `BIGEYE_FILTER_BETA` | 3.0, 0.02 | one-euro filter |
 | `BIGEYE_GAZE_SCALE_DEG` | 45 | angle full scale of the model output |
 | `BIGEYE_PITCH_LIMIT_DEG`, `BIGEYE_PITCH_GAIN` | 0 (off), 1 | bound and gain for models with weak vertical response |
-| `BIGEYE_CAPTURE` | unset | training capture stream |
 | `BIGEYE_DUMP` | unset | write model inputs as a PGM sequence for crop inspection |
 
 All of these are also adjustable at runtime in the debug GUI.

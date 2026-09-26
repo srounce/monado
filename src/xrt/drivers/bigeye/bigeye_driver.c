@@ -97,8 +97,6 @@ DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_a_x, "BIGEYE_CROP_A_X", BIGEYE_CROP_A_X)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_b_x, "BIGEYE_CROP_B_X", BIGEYE_CROP_B_X)
 DEBUG_GET_ONCE_NUM_OPTION(bigeye_crop_y, "BIGEYE_CROP_Y", BIGEYE_CROP_Y)
 DEBUG_GET_ONCE_OPTION(bigeye_dump, "BIGEYE_DUMP", NULL)
-// Training capture: every preprocessed frame pair with its timestamp, raw.
-DEBUG_GET_ONCE_OPTION(bigeye_capture, "BIGEYE_CAPTURE", NULL)
 // Eye image orientation relative to what the model was trained on. The Beyond
 // 2e cameras are mirrored versus the reference rig; with the wrong orientation
 // one eye's yaw inverts and the lid-weighted average cancels most of it.
@@ -179,7 +177,8 @@ struct bigeye_device
 	const char *dump_path;
 	int dump_counter;
 
-	//! Training capture stream, see BIGEYE_CAPTURE.
+	//! Training set stream, every preprocessed frame pair with its timestamp,
+	//! see xrt_device::start_eye_tracking_capture. Protected by mutex.
 	FILE *capture;
 
 	//! Per-user mapping from the calibration tool, see bigeye_load_calibration.
@@ -566,12 +565,14 @@ bigeye_sink_push_frame(struct xrt_frame_sink *xfs, struct xrt_frame *xf)
 		bigeye_dump_inputs(d);
 	}
 
+	os_mutex_lock(&d->mutex);
 	if (d->capture != NULL) {
 		int64_t ts = xf->timestamp;
 		fwrite(&ts, sizeof(ts), 1, d->capture);
 		fwrite(d->ring[d->ring_head][0], 1, BIGEYE_INPUT_SIZE * BIGEYE_INPUT_SIZE, d->capture);
 		fwrite(d->ring[d->ring_head][1], 1, BIGEYE_INPUT_SIZE * BIGEYE_INPUT_SIZE, d->capture);
 	}
+	os_mutex_unlock(&d->mutex);
 
 	if (d->ring_count < BIGEYE_INPUT_FRAMES) {
 		d->ring_count++;
@@ -719,6 +720,48 @@ bigeye_get_tracked_pose(struct xrt_device *xdev,
 	return XRT_SUCCESS;
 }
 
+static void
+bigeye_capture_close_locked(struct bigeye_device *d)
+{
+	if (d->capture != NULL) {
+		fclose(d->capture);
+		d->capture = NULL;
+		BIGEYE_INFO(d, "Training set capture closed");
+	}
+}
+
+static xrt_result_t
+bigeye_start_eye_tracking_capture(struct xrt_device *xdev, const char *path)
+{
+	struct bigeye_device *d = bigeye_device(xdev);
+	xrt_result_t xret = XRT_SUCCESS;
+
+	os_mutex_lock(&d->mutex);
+	bigeye_capture_close_locked(d);
+	d->capture = fopen(path, "wb");
+	if (d->capture == NULL) {
+		BIGEYE_WARN(d, "Cannot open training set file %s", path);
+		xret = XRT_ERROR_INVALID_ARGUMENT;
+	} else {
+		BIGEYE_INFO(d, "Training set capture to %s", path);
+	}
+	os_mutex_unlock(&d->mutex);
+
+	return xret;
+}
+
+static xrt_result_t
+bigeye_stop_eye_tracking_capture(struct xrt_device *xdev)
+{
+	struct bigeye_device *d = bigeye_device(xdev);
+
+	os_mutex_lock(&d->mutex);
+	bigeye_capture_close_locked(d);
+	os_mutex_unlock(&d->mutex);
+
+	return XRT_SUCCESS;
+}
+
 static xrt_result_t
 bigeye_begin_feature(struct xrt_device *xdev, enum xrt_device_feature_type type)
 {
@@ -759,6 +802,8 @@ bigeye_end_feature(struct xrt_device *xdev, enum xrt_device_feature_type type)
 	if (stop) {
 		d->feature_enabled = false;
 		bigeye_stream_stop_locked(d);
+		// Also ends a capture whose tool crashed without clearing it.
+		bigeye_capture_close_locked(d);
 	}
 	os_mutex_unlock(&d->mutex);
 
@@ -856,12 +901,6 @@ bigeye_device_create(struct xrt_device *head)
 	d->crop_b_x = (int)debug_get_num_option_bigeye_crop_b_x();
 	d->crop_y = (int)debug_get_num_option_bigeye_crop_y();
 	d->dump_path = debug_get_option_bigeye_dump();
-	if (debug_get_option_bigeye_capture() != NULL) {
-		d->capture = fopen(debug_get_option_bigeye_capture(), "wb");
-		if (d->capture == NULL) {
-			U_LOG_IFL_W(log_level, "Cannot open capture file %s", debug_get_option_bigeye_capture());
-		}
-	}
 	d->flip_a = debug_get_bool_option_bigeye_flip_a();
 	d->flip_b = debug_get_bool_option_bigeye_flip_b();
 	d->swap_eyes = debug_get_bool_option_bigeye_swap();
@@ -938,6 +977,8 @@ bigeye_device_create(struct xrt_device *head)
 	u_device_populate_function_pointers(&d->base, bigeye_get_tracked_pose, bigeye_destroy);
 	d->base.begin_feature = bigeye_begin_feature;
 	d->base.end_feature = bigeye_end_feature;
+	d->base.start_eye_tracking_capture = bigeye_start_eye_tracking_capture;
+	d->base.stop_eye_tracking_capture = bigeye_stop_eye_tracking_capture;
 
 	BIGEYE_INFO(d, "Created Bigeye eye tracking device, model '%s'", model_path);
 

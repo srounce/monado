@@ -19,12 +19,16 @@
 // no pipeline, vertex data or shader.
 
 #include <math.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
+
+#include "monado.h"
 
 #include <vulkan/vulkan.h>
 
@@ -580,6 +584,69 @@ run_quadviews(XrInstance instance,
 	return 0;
 }
 
+static volatile sig_atomic_t interrupted = 0;
+
+static void
+on_sigint(int sig)
+{
+	(void)sig;
+	interrupted = 1;
+}
+
+/*
+ * The driver opens the training set file itself, so it needs a path that
+ * means the same thing in the service's process.
+ */
+static bool
+absolute_path(const char *in, char *out, size_t size)
+{
+	if (in[0] == '/') {
+		return snprintf(out, size, "%s", in) < (int)size;
+	}
+	char cwd[1024];
+	if (getcwd(cwd, sizeof(cwd)) == NULL) {
+		return false;
+	}
+	return snprintf(out, size, "%s/%s", cwd, in) < (int)size;
+}
+
+/*
+ * Ask the eye tracker to stream its model inputs to `path` for the run.
+ * Returns the libmonado root to clear it with, NULL on failure.
+ */
+static mnd_root_t *
+training_set_begin(const char *path, int32_t *out_eyes)
+{
+	mnd_root_t *root = NULL;
+	if (mnd_root_create(&root) != MND_SUCCESS) {
+		fprintf(stderr, "cannot connect to the monado service\n");
+		return NULL;
+	}
+	int32_t eyes = -1;
+	if (mnd_root_get_device_from_role(root, "eyes", &eyes) != MND_SUCCESS || eyes < 0) {
+		fprintf(stderr, "no eye tracker device in the service\n");
+		mnd_root_destroy(&root);
+		return NULL;
+	}
+	if (mnd_root_start_eye_tracking_capture(root, (uint32_t)eyes, path) != MND_SUCCESS) {
+		fprintf(stderr, "eye tracker cannot capture to %s\n", path);
+		mnd_root_destroy(&root);
+		return NULL;
+	}
+	*out_eyes = eyes;
+	return root;
+}
+
+static void
+training_set_end(mnd_root_t **root, int32_t eyes)
+{
+	if (*root == NULL) {
+		return;
+	}
+	mnd_root_stop_eye_tracking_capture(*root, (uint32_t)eyes);
+	mnd_root_destroy(root);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -589,6 +656,38 @@ main(int argc, char **argv)
 	bool quadviews = argc > 1 && strcmp(argv[1], "quadviews") == 0;
 	const char *record_path = record ? argv[2] : NULL;
 	setvbuf(stdout, NULL, _IONBF, 0);
+
+	if (argc > 1 && strcmp(argv[1], "record") == 0 && !record) {
+		fprintf(stderr, "usage: %s record <labels.txt> [training_set.bin]\n", argv[0]);
+		return 1;
+	}
+
+	// Record mode: the driver captures to capture_path while the tool logs
+	// labels to record_path. Default the capture beside the labels.
+	char capture_path[1024] = {0};
+	mnd_root_t *mnd = NULL;
+	int32_t eyes = -1;
+	if (record) {
+		char given[1024];
+		if (argc > 3) {
+			snprintf(given, sizeof(given), "%s", argv[3]);
+		} else {
+			const char *dot = strrchr(record_path, '.');
+			const char *slash = strrchr(record_path, '/');
+			int stem = dot != NULL && (slash == NULL || dot > slash) ? (int)(dot - record_path)
+			                                                          : (int)strlen(record_path);
+			snprintf(given, sizeof(given), "%.*s.bin", stem, record_path);
+		}
+		if (!absolute_path(given, capture_path, sizeof(capture_path))) {
+			fprintf(stderr, "cannot resolve %s\n", given);
+			return 1;
+		}
+		mnd = training_set_begin(capture_path, &eyes);
+		if (mnd == NULL) {
+			return 1;
+		}
+		signal(SIGINT, on_sigint);
+	}
 
 	/*
 	 * Instance, system.
@@ -881,7 +980,7 @@ main(int argc, char **argv)
 	/*
 	 * Record mode: the dot does slow smooth pursuit over the gaze range while
 	 * the target angles are logged per frame with the display timestamp, so
-	 * they can be joined against the driver's BIGEYE_CAPTURE frames to train
+	 * they can be joined against the driver's training set frames to train
 	 * a per-user model. Ends with an eyes-closed segment for lid labels.
 	 */
 	if (record) {
@@ -891,6 +990,7 @@ main(int argc, char **argv)
 		FILE *log = fopen(record_path, "w");
 		if (log == NULL) {
 			fprintf(stderr, "cannot write %s\n", record_path);
+			training_set_end(&mnd, eyes);
 			return 1;
 		}
 		XrActiveActionSet active_r = {.actionSet = action_set};
@@ -913,7 +1013,7 @@ main(int argc, char **argv)
 			}
 			double t = (fs.predictedDisplayTime - start) / 1e9;
 			bool closed = t > lead_s + pursuit_s;
-			if (t > lead_s + pursuit_s + blink_s) {
+			if (t > lead_s + pursuit_s + blink_s || interrupted) {
 				XrFrameEndInfo fei = {.type = XR_TYPE_FRAME_END_INFO,
 				                      .displayTime = fs.predictedDisplayTime,
 				                      .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
@@ -927,7 +1027,7 @@ main(int argc, char **argv)
 			double pitch = closed ? 0.0 : 15.0 * sin(2.0 * M_PI * u / 8.3);
 
 			// Keeping the gaze space in use keeps the driver processing frames,
-			// which is what feeds BIGEYE_CAPTURE. The live gaze is logged too.
+			// which is what feeds the training set. The live gaze is logged too.
 			CK(xrSyncActions(session, &asi_r));
 			double gy = 0, gp = 0;
 			XrSpaceLocation loc = {.type = XR_TYPE_SPACE_LOCATION};
@@ -971,10 +1071,12 @@ main(int argc, char **argv)
 			CK(xrEndFrame(session, &fei));
 		}
 		fclose(log);
-		printf("wrote %s\n", record_path);
+		training_set_end(&mnd, eyes);
+		printf("%swrote %s and %s\n", interrupted ? "interrupted, " : "", record_path, capture_path);
+		printf("train with: bigeye_train %s %s\n", capture_path, record_path);
 		xrDestroySession(session);
 		xrDestroyInstance(instance);
-		return 0;
+		return interrupted ? 1 : 0;
 	}
 
 	/*
