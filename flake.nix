@@ -63,6 +63,12 @@
             # Survive has not received a new tagged release in years, so use the
             # version provided by nixpkgs-xr instead
             (inputs.nixpkgs-xr.packages.${system}.libsurvive)
+
+            # Constellation tracking needs full Ceres rather than the vendored tinyceres
+            ceres-solver
+
+            # bigeye_calibration is an OpenXR client
+            openxr-loader
           ];
 
           package = pkgs.monado.overrideAttrs (oldAttrs: {
